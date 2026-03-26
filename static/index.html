@@ -571,15 +571,15 @@
         }
       });
 
-      // Build step list: loaded steps from data + unloaded versions (shown as version labels)
+      // Build ordered step list from loaded data
       const loadedSteps = [...new Set(Object.values(versionToStep))].sort((a, b) => a - b);
+      // Unloaded versions — we don't know their step yet
       const unloadedVersions = allVersions.filter(v => !loadedVersions.has(v.version));
 
       // When step filter changes, auto-load the version if needed
       const handleStepSelect = (val) => {
         setStepFilter(val);
         setShowCount(20);
-        // If selecting an unloaded version, load it
         if (val.startsWith('_v:') && onLoadVersion) {
           onLoadVersion(val.slice(3));
         }
@@ -588,13 +588,8 @@
       let filteredTraces = allTraces?.traces || [];
       if (stepFilter !== 'all') {
         if (stepFilter.startsWith('_v:')) {
-          // Filtering by version (unloaded or just loaded)
           const ver = stepFilter.slice(3);
           filteredTraces = filteredTraces.filter(t => t.artifact_version === ver);
-          // Once loaded, switch filter to the actual step
-          if (filteredTraces.length > 0 && filteredTraces[0].step != null) {
-            // Don't call setState during render; leave as-is, it'll work
-          }
         } else {
           filteredTraces = filteredTraces.filter(t => String(t.step) === stepFilter);
         }
@@ -617,72 +612,63 @@
 
       return (
         <div className="space-y-3 fade-in">
-          {/* Step selector */}
+          {/* Step selector — steps are primary, versions are hidden */}
           {(allVersions.length > 0 || hasTraces) && (
             <div className="flex items-center gap-2 flex-wrap">
-              <select value={stepFilter} onChange={e => handleStepSelect(e.target.value)}
-                className={`px-2 py-1 text-xs rounded border focus:outline-none ${C.input}`}>
-                <option value="all">All loaded steps ({totalCount} traces)</option>
-                {loadedSteps.map(s => (
-                  <option key={`s${s}`} value={String(s)}>
-                    Step {s} ({(allTraces?.traces || []).filter(t => t.step === s).length} traces)
-                  </option>
-                ))}
-                {unloadedVersions.length > 0 && (
-                  <option disabled>── Unloaded ──</option>
-                )}
-                {unloadedVersions.map(v => (
-                  <option key={v.version} value={`_v:${v.version}`}>
-                    {v.version} — click to load
-                  </option>
-                ))}
-              </select>
+              {/* Step buttons — loaded steps as pill buttons */}
+              <div className="flex gap-1 flex-wrap items-center">
+                <button onClick={() => handleStepSelect('all')}
+                  className={`px-2.5 py-1 text-xs rounded-full transition-colors ${stepFilter === 'all' ? C.btnActive : C.btn}`}>
+                  All ({totalCount})
+                </button>
+                {loadedSteps.map(s => {
+                  const count = (allTraces?.traces || []).filter(t => t.step === s).length;
+                  const ok = (allTraces?.traces || []).filter(t => t.step === s && t.reward > 0).length;
+                  return (
+                    <button key={s} onClick={() => handleStepSelect(String(s))}
+                      className={`px-2.5 py-1 text-xs rounded-full transition-colors ${stepFilter === String(s) ? C.btnActive : C.btn}`}>
+                      Step {s} <span className={`${C.textFaint}`}>({ok}/{count})</span>
+                    </button>
+                  );
+                })}
+                {/* Unloaded steps — click to load */}
+                {unloadedVersions.map(v => {
+                  const isLoading = loadingVersion === v.version;
+                  return (
+                    <button key={v.version}
+                      onClick={() => handleStepSelect(`_v:${v.version}`)}
+                      className={`px-2.5 py-1 text-xs rounded-full border border-dashed transition-colors ${
+                        isLoading ? 'border-yellow-400 text-yellow-600 dark:text-yellow-400 animate-pulse'
+                        : `${C.border} ${C.textMuted} hover:border-brand-400 hover:text-brand-500`
+                      }`}>
+                      {isLoading ? <React.Fragment><Spinner /> Loading...</React.Fragment> : v.version}
+                    </button>
+                  );
+                })}
+              </div>
 
-              <div className="flex gap-1">
+              {/* Reward filter */}
+              <div className="flex gap-1 ml-auto">
                 {['all', 'success', 'fail'].map(f => (
                   <button key={f} onClick={() => { setRewardFilter(f); setShowCount(20); }}
                     className={`px-2 py-0.5 text-xs rounded transition-colors ${rewardFilter === f ? C.btnActive : C.btn}`}>
-                    {f === 'all' ? 'All' : f === 'success' ? 'Success' : 'Fail'}
+                    {f === 'all' ? 'All' : f === 'success' ? 'Pass' : 'Fail'}
                   </button>
                 ))}
               </div>
-
-              {loadingVersion != null && (
-                <span className="flex items-center gap-1 text-xs text-yellow-600 dark:text-yellow-400">
-                  <Spinner /> Loading {loadingVersion}...
-                </span>
-              )}
-
-              <span className={`text-xs ml-auto ${C.textFaint}`}>
-                {totalFiltered} traces
-                {totalFiltered > 0 && ` (${successCount} ok, ${totalFiltered - successCount} fail)`}
-              </span>
             </div>
           )}
 
-          {/* Version chips — compact summary */}
-          {allVersions.length > 2 && (
-            <div className="flex flex-wrap gap-1 items-center">
-              <span className={`text-[10px] ${C.textFaint} mr-1`}>Versions:</span>
-              {allVersions.map(v => {
-                const loaded = loadedVersions.has(v.version);
-                const isLoading = loadingVersion === v.version;
-                const step = versionToStep[v.version];
-                return (
-                  <button key={v.version}
-                    onClick={() => {
-                      if (!loaded && !isLoading && onLoadVersion) onLoadVersion(v.version);
-                      handleStepSelect(loaded && step != null ? String(step) : `_v:${v.version}`);
-                    }}
-                    className={`px-1.5 py-0 text-[10px] rounded font-mono transition-colors ${
-                      loaded ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
-                      : isLoading ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 animate-pulse'
-                      : `${C.textMuted} hover:text-brand-500 dark:hover:text-brand-400 cursor-pointer`
-                    }`}>
-                    {v.version}{step != null ? ` (step ${step})` : ''}
-                  </button>
-                );
-              })}
+          {/* Summary line */}
+          {totalFiltered > 0 && (
+            <div className={`text-xs ${C.textFaint}`}>
+              {totalFiltered} traces — {successCount} pass, {totalFiltered - successCount} fail
+              {stepFilter !== 'all' && !stepFilter.startsWith('_v:') && ` (step ${stepFilter})`}
+              {loadingVersion != null && (
+                <span className="ml-2 text-yellow-600 dark:text-yellow-400">
+                  Loading {loadingVersion}...
+                </span>
+              )}
             </div>
           )}
 
