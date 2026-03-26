@@ -125,9 +125,9 @@
       borderSoft: 'border-gray-100 dark:border-gray-800/50',
       // Text
       text: 'text-gray-900 dark:text-gray-100',
-      textSecondary: 'text-gray-600 dark:text-gray-400',
-      textMuted: 'text-gray-400 dark:text-gray-500',
-      textFaint: 'text-gray-300 dark:text-gray-600',
+      textSecondary: 'text-gray-700 dark:text-gray-300',
+      textMuted: 'text-gray-500 dark:text-gray-400',
+      textFaint: 'text-gray-400 dark:text-gray-500',
       // Interactive
       hoverBg: 'hover:bg-gray-100 dark:hover:bg-gray-900/80',
       activeBg: 'bg-gray-100 dark:bg-gray-800/50',
@@ -917,7 +917,7 @@
           <button onClick={() => setExpanded(!expanded)} className="flex items-center gap-2 w-full text-left">
             <span className="text-xs font-medium shrink-0" style={{ color: labelColor }}>{label}</span>
             <span className={`text-xs ${C.textFaint}`}>{expanded ? '▾' : '▸'}</span>
-            {!expanded && <span className={`text-xs truncate flex-1 ${C.textFaint}`}>{preview}</span>}
+            {!expanded && <span className={`text-xs truncate flex-1 ${C.textMuted}`}>{preview}</span>}
           </button>
           {expanded && (
             <div className="mt-1 space-y-1">
