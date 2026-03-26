@@ -555,20 +555,61 @@
 
       const allTraces = pastedData || traces;
       const hasTraces = allTraces?.traces?.length > 0;
-      const steps = [...new Set((allTraces?.traces || []).map(t => t.step).filter(s => s != null))].sort((a, b) => b - a);
-
-      let filteredTraces = allTraces?.traces || [];
-      if (stepFilter !== 'all') filteredTraces = filteredTraces.filter(t => String(t.step) === stepFilter);
-      if (rewardFilter === 'success') filteredTraces = filteredTraces.filter(t => t.reward > 0);
-      if (rewardFilter === 'fail') filteredTraces = filteredTraces.filter(t => t.reward === 0 || t.reward === 0.0);
-
-      const successCount = (allTraces?.traces || []).filter(t => t.reward > 0).length;
-      const totalCount = allTraces?.traces?.length || 0;
 
       const allVersions = traces?.versions || [];
       const loadedVersions = new Set(traces?.loaded_versions || []);
       const loadingVersion = traces?._loadingVersion;
+
+      // Build step → version mapping from loaded traces
+      const versionToStep = {};
+      const stepToVersions = {};
+      (allTraces?.traces || []).forEach(t => {
+        if (t.step != null && t.artifact_version) {
+          versionToStep[t.artifact_version] = t.step;
+          if (!stepToVersions[t.step]) stepToVersions[t.step] = new Set();
+          stepToVersions[t.step].add(t.artifact_version);
+        }
+      });
+
+      // Build step list: loaded steps from data + unloaded versions (shown as version labels)
+      const loadedSteps = [...new Set(Object.values(versionToStep))].sort((a, b) => a - b);
       const unloadedVersions = allVersions.filter(v => !loadedVersions.has(v.version));
+
+      // When step filter changes, auto-load the version if needed
+      const handleStepSelect = (val) => {
+        setStepFilter(val);
+        setShowCount(20);
+        // If selecting an unloaded version, load it
+        if (val.startsWith('_v:') && onLoadVersion) {
+          onLoadVersion(val.slice(3));
+        }
+      };
+
+      let filteredTraces = allTraces?.traces || [];
+      if (stepFilter !== 'all') {
+        if (stepFilter.startsWith('_v:')) {
+          // Filtering by version (unloaded or just loaded)
+          const ver = stepFilter.slice(3);
+          filteredTraces = filteredTraces.filter(t => t.artifact_version === ver);
+          // Once loaded, switch filter to the actual step
+          if (filteredTraces.length > 0 && filteredTraces[0].step != null) {
+            // Don't call setState during render; leave as-is, it'll work
+          }
+        } else {
+          filteredTraces = filteredTraces.filter(t => String(t.step) === stepFilter);
+        }
+      }
+      if (rewardFilter === 'success') filteredTraces = filteredTraces.filter(t => t.reward > 0);
+      if (rewardFilter === 'fail') filteredTraces = filteredTraces.filter(t => t.reward === 0 || t.reward === 0.0);
+
+      const successCount = filteredTraces.filter(t => t.reward > 0).length;
+      const totalFiltered = filteredTraces.length;
+      const totalCount = (allTraces?.traces || []).length;
+
+      // Progressive display
+      const [showCount, setShowCount] = useState(20);
+      const displayedTraces = filteredTraces.slice(0, showCount);
+      const hasMore = filteredTraces.length > showCount;
 
       if (selected) {
         return <TraceDetail trace={selected} onBack={() => setSelected(null, null)} />;
@@ -576,10 +617,79 @@
 
       return (
         <div className="space-y-3 fade-in">
+          {/* Step selector */}
+          {(allVersions.length > 0 || hasTraces) && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <select value={stepFilter} onChange={e => handleStepSelect(e.target.value)}
+                className={`px-2 py-1 text-xs rounded border focus:outline-none ${C.input}`}>
+                <option value="all">All loaded steps ({totalCount} traces)</option>
+                {loadedSteps.map(s => (
+                  <option key={`s${s}`} value={String(s)}>
+                    Step {s} ({(allTraces?.traces || []).filter(t => t.step === s).length} traces)
+                  </option>
+                ))}
+                {unloadedVersions.length > 0 && (
+                  <option disabled>── Unloaded ──</option>
+                )}
+                {unloadedVersions.map(v => (
+                  <option key={v.version} value={`_v:${v.version}`}>
+                    {v.version} — click to load
+                  </option>
+                ))}
+              </select>
+
+              <div className="flex gap-1">
+                {['all', 'success', 'fail'].map(f => (
+                  <button key={f} onClick={() => { setRewardFilter(f); setShowCount(20); }}
+                    className={`px-2 py-0.5 text-xs rounded transition-colors ${rewardFilter === f ? C.btnActive : C.btn}`}>
+                    {f === 'all' ? 'All' : f === 'success' ? 'Success' : 'Fail'}
+                  </button>
+                ))}
+              </div>
+
+              {loadingVersion != null && (
+                <span className="flex items-center gap-1 text-xs text-yellow-600 dark:text-yellow-400">
+                  <Spinner /> Loading {loadingVersion}...
+                </span>
+              )}
+
+              <span className={`text-xs ml-auto ${C.textFaint}`}>
+                {totalFiltered} traces
+                {totalFiltered > 0 && ` (${successCount} ok, ${totalFiltered - successCount} fail)`}
+              </span>
+            </div>
+          )}
+
+          {/* Version chips — compact summary */}
+          {allVersions.length > 2 && (
+            <div className="flex flex-wrap gap-1 items-center">
+              <span className={`text-[10px] ${C.textFaint} mr-1`}>Versions:</span>
+              {allVersions.map(v => {
+                const loaded = loadedVersions.has(v.version);
+                const isLoading = loadingVersion === v.version;
+                const step = versionToStep[v.version];
+                return (
+                  <button key={v.version}
+                    onClick={() => {
+                      if (!loaded && !isLoading && onLoadVersion) onLoadVersion(v.version);
+                      handleStepSelect(loaded && step != null ? String(step) : `_v:${v.version}`);
+                    }}
+                    className={`px-1.5 py-0 text-[10px] rounded font-mono transition-colors ${
+                      loaded ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+                      : isLoading ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 animate-pulse'
+                      : `${C.textMuted} hover:text-brand-500 dark:hover:text-brand-400 cursor-pointer`
+                    }`}>
+                    {v.version}{step != null ? ` (step ${step})` : ''}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           <div className="flex items-center gap-2 flex-wrap">
             <button onClick={() => setPasteMode(!pasteMode)}
               className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${pasteMode ? 'bg-purple-100 dark:bg-purple-600/20 border-purple-300 dark:border-purple-500/30 text-purple-600 dark:text-purple-400' : `${C.btn} border ${C.border}`}`}>
-              {pasteMode ? 'Cancel' : 'Paste Trajectory JSON'}
+              {pasteMode ? 'Cancel' : 'Paste JSON'}
             </button>
             {pastedData && (
               <button onClick={() => setPastedData(null)}
@@ -589,78 +699,7 @@
             )}
           </div>
 
-          {/* Version selector */}
-          {allVersions.length > 0 && (
-            <div className={`p-2.5 rounded-lg border ${C.bgSoft} ${C.border}`}>
-              <div className="flex items-center gap-2 mb-1.5">
-                <span className={`text-xs font-medium ${C.textSecondary}`}>
-                  Artifact versions ({allVersions.length} total, {loadedVersions.size} loaded)
-                </span>
-                {loadingVersion != null && <Spinner />}
-              </div>
-              <div className="flex flex-wrap gap-1">
-                {allVersions.map(v => {
-                  const loaded = loadedVersions.has(v.version);
-                  const isLoading = loadingVersion === v.version;
-                  return (
-                    <button key={v.version}
-                      onClick={() => !loaded && !isLoading && onLoadVersion && onLoadVersion(v.version)}
-                      disabled={loaded || isLoading}
-                      className={`px-2 py-0.5 text-xs rounded font-mono transition-colors ${
-                        loaded ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-300 dark:border-green-700/40'
-                        : isLoading ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 border border-yellow-300 dark:border-yellow-700/40 animate-pulse'
-                        : `${C.btn} border ${C.border} cursor-pointer hover:bg-brand-100 dark:hover:bg-brand-900/30`
-                      }`}
-                      title={loaded ? `${v.version} loaded` : isLoading ? 'Loading...' : `Click to load ${v.version}`}>
-                      {v.version}
-                    </button>
-                  );
-                })}
-              </div>
-              {unloadedVersions.length > 0 && (
-                <button onClick={() => {
-                  // Load all remaining versions sequentially
-                  if (onLoadVersion) {
-                    unloadedVersions.forEach((v, i) => setTimeout(() => onLoadVersion(v.version), i * 500));
-                  }
-                }}
-                className={`mt-1.5 px-3 py-1 text-xs rounded-lg ${C.btn} border ${C.border}`}>
-                  Load all ({unloadedVersions.length} remaining)
-                </button>
-              )}
-            </div>
-          )}
-
-          {hasTraces && (
-            <div className="flex items-center gap-3 text-xs">
-              <span className={C.textSecondary}>{totalCount} traces from <span className="text-brand-500 dark:text-brand-400">{allTraces.source}</span></span>
-              <span className="text-green-600 dark:text-green-400">{successCount} success ({totalCount > 0 ? (100 * successCount / totalCount).toFixed(0) : 0}%)</span>
-              <span className="text-red-600 dark:text-red-400">{totalCount - successCount} fail</span>
-            </div>
-          )}
-
-          {hasTraces && (
-            <div className="flex items-center gap-2 flex-wrap">
-              {steps.length > 1 && (
-                <select value={stepFilter} onChange={e => setStepFilter(e.target.value)}
-                  className={`px-2 py-1 text-xs rounded border focus:outline-none ${C.input}`}>
-                  <option value="all">All steps ({steps.length})</option>
-                  {steps.map(s => <option key={s} value={String(s)}>Step {s}</option>)}
-                </select>
-              )}
-              <div className="flex gap-1">
-                {['all', 'success', 'fail'].map(f => (
-                  <button key={f} onClick={() => setRewardFilter(f)}
-                    className={`px-2 py-0.5 text-xs rounded transition-colors ${rewardFilter === f ? C.btnActive : C.btn}`}>
-                    {f === 'all' ? 'All' : f === 'success' ? 'Success' : 'Fail'}
-                  </button>
-                ))}
-              </div>
-              <span className={`text-xs ml-auto ${C.textFaint}`}>{filteredTraces.length} shown</span>
-            </div>
-          )}
-
-          {!hasTraces && !pasteMode && (
+          {!hasTraces && !pasteMode && allVersions.length === 0 && (
             <div className={`p-4 text-center text-sm ${C.textMuted}`}>
               {allTraces?.source === 'not_available'
                 ? 'W&B is not reachable. Cannot fetch trajectory artifacts.'
@@ -681,9 +720,9 @@
             </div>
           )}
 
-          {filteredTraces.length > 0 && (
+          {displayedTraces.length > 0 && (
             <div className="space-y-1">
-              {filteredTraces.map((t, i) => {
+              {displayedTraces.map((t, i) => {
                 const globalIdx = (allTraces?.traces || []).indexOf(t);
                 return (
                 <button key={t.id || i}
@@ -706,6 +745,18 @@
                 </button>
               );
               })}
+              {hasMore && (
+                <div className="flex items-center justify-center gap-3 pt-2">
+                  <button onClick={() => setShowCount(s => s + 20)}
+                    className={`px-4 py-1.5 text-xs rounded-lg border ${C.btn} ${C.border} hover:border-brand-400`}>
+                    Show 20 more ({filteredTraces.length - showCount} remaining)
+                  </button>
+                  <button onClick={() => setShowCount(filteredTraces.length)}
+                    className={`px-3 py-1.5 text-xs rounded-lg ${C.textMuted} hover:${C.text}`}>
+                    Show all
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
