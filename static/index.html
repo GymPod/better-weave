@@ -108,7 +108,6 @@
       history: (id) => api.get(`${_apiBase}/runs/${id}/history?${api._ep()}`),
       traces: (id) => api.get(`${_apiBase}/runs/${id}/traces?${api._ep()}`),
       ask: (body) => api.post(`${_apiBase}/ask`, { ...body, entity: _apiEntity, project: _apiProject }),
-      syncStatus: () => api.get(`${_apiBase}/sync_status`),
       config: () => api.get(`${_apiBase}/config`),
     };
 
@@ -1278,8 +1277,6 @@
       const [projectInput, setProjectInput] = useState(initProject);
       const [liveMode, setLiveMode] = useState(false);
       const [runListKey, setRunListKey] = useState(0);
-      const [syncing, setSyncing] = useState(false);
-      const [syncInfo, setSyncInfo] = useState(null);
       const [theme, setTheme] = useState(() => {
         try { return localStorage.getItem('bw-theme') || 'dark'; } catch { return 'dark'; }
       });
@@ -1301,7 +1298,6 @@
             api.setProject(cfg.entity, cfg.project);
           }
         }).catch(() => {});
-        api.syncStatus().then(s => setSyncInfo(s)).catch(() => {});
       }, []);
 
       const handleSelectRun = (run, fromRestore) => {
@@ -1314,21 +1310,6 @@
       const handleSelectTrace = (trace) => {
         setSelectedTrace(trace);
         // Don't write trace index to hash here - TracesTab will handle it
-      };
-
-      const handleSync = async () => {
-        setSyncing(true);
-        try {
-          await fetch(`${_apiBase}/trigger_sync?limit=50&detail_top=15`, { method: 'POST' });
-        } catch (e) {
-          console.error('Sync failed:', e);
-        }
-        try {
-          const s = await api.syncStatus();
-          setSyncInfo(s);
-        } catch (e) {}
-        setRunListKey(k => k + 1);  // triggers RunList refresh without remount
-        setSyncing(false);
       };
 
       const applyProject = () => {
@@ -1375,19 +1356,6 @@
                 {liveMode && <Badge color="green">live</Badge>}
               </div>
               <div className="ml-auto flex items-center gap-3">
-                {syncInfo && (
-                  <span className={`text-xs ${C.textFaint}`}>
-                    Synced: {syncInfo.synced_at?.slice(0, 16).replace('T',' ')} ({syncInfo.num_runs} runs)
-                  </span>
-                )}
-                <button
-                  onClick={handleSync}
-                  disabled={syncing}
-                  className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${
-                    syncing ? 'opacity-60 cursor-wait' : ''
-                  } bg-brand-500 hover:bg-brand-600 text-white`}>
-                  {syncing ? 'Syncing...' : 'Sync'}
-                </button>
                 <a href={`https://wandb.agi.amazon.dev/${entity}/${project}`}
                    target="_blank" rel="noreferrer"
                    className={`text-xs ${C.textMuted} hover:text-gray-700 dark:hover:text-gray-300`}>
