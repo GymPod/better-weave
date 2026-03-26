@@ -587,13 +587,14 @@
       };
 
       // Auto-switch from version filter to step filter once loaded
+      const versionToStepJson = JSON.stringify(versionToStep);
       useEffect(() => {
         if (stepFilter.startsWith('_v:')) {
           const ver = stepFilter.slice(3);
-          const step = versionToStep[ver];
-          if (step != null) setStepFilter(String(step));
+          const map = JSON.parse(versionToStepJson);
+          if (map[ver] != null) setStepFilter(String(map[ver]));
         }
-      }, [stepFilter, versionToStep]);
+      }, [stepFilter, versionToStepJson]);
 
       let filteredTraces = allTraces?.traces || [];
       if (stepFilter !== 'all') {
