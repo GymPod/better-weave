@@ -1,0 +1,1343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Better Weave - Trajectory Viewer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            brand: { 50: '#f0f4ff', 100: '#dbe4ff', 200: '#bac8ff', 300: '#91a7ff', 400: '#748ffc', 500: '#5c7cfa', 600: '#4c6ef5', 700: '#4263eb', 800: '#3b5bdb', 900: '#364fc7' },
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+    .fade-in { animation: fadeIn 0.2s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    .scrollbar-thin::-webkit-scrollbar { width: 6px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    .dark .scrollbar-thin::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    .trajectory-block { white-space: pre-wrap; word-break: break-word; }
+    .turn-user { border-left: 3px solid #3b82f6; }
+    .turn-assistant { border-left: 3px solid #10b981; }
+    .turn-tool-result { border-left: 3px solid #f59e0b; }
+    .turn-error { border-left: 3px solid #ef4444; }
+    .turn-verification { border-left: 3px solid #8b5cf6; }
+    .metric-sparkline { display: inline-block; }
+    .ai-msg p { margin-bottom: 0.5em; }
+    .dark .ai-msg code { background: #1f2937; padding: 1px 4px; border-radius: 3px; font-size: 0.875em; }
+    .dark .ai-msg pre { background: #1f2937; padding: 8px 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
+    .ai-msg code { background: #e5e7eb; padding: 1px 4px; border-radius: 3px; font-size: 0.875em; }
+    .ai-msg pre { background: #f3f4f6; padding: 8px 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
+    .ai-msg ul, .ai-msg ol { margin-left: 1.5em; margin-bottom: 0.5em; }
+    .ai-msg li { margin-bottom: 0.25em; }
+  </style>
+</head>
+<body class="bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 min-h-screen transition-colors">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback, createContext, useContext } = React;
+
+    // ---- Theme Context ----
+    const ThemeContext = createContext('dark');
+    function useTheme() { return useContext(ThemeContext); }
+
+    // ---- Error Boundary ----
+    class ErrorBoundary extends React.Component {
+      constructor(props) { super(props); this.state = { error: null }; }
+      static getDerivedStateFromError(error) { return { error }; }
+      render() {
+        if (this.state.error) {
+          return React.createElement('div', { className: 'p-4 text-red-500' },
+            React.createElement('p', { className: 'font-medium' }, 'Something went wrong rendering this view.'),
+            React.createElement('pre', { className: 'text-xs text-red-400 mt-2 mono' }, String(this.state.error)),
+            React.createElement('button', {
+              className: 'mt-2 px-3 py-1 text-xs bg-gray-200 dark:bg-gray-800 rounded hover:bg-gray-300 dark:hover:bg-gray-700',
+              onClick: () => this.setState({ error: null })
+            }, 'Retry')
+          );
+        }
+        return this.props.children;
+      }
+    }
+
+    // ---- API ----
+    let _apiEntity = 'autonomy';
+    let _apiProject = 'slime-agent';
+
+    const api = {
+      setProject(entity, project) { _apiEntity = entity; _apiProject = project; },
+      _ep(params = {}) {
+        return new URLSearchParams({ entity: _apiEntity, project: _apiProject, ...params });
+      },
+      async get(url) {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+        return r.json();
+      },
+      async post(url, body) {
+        const r = await fetch(url, {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+        });
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+        return r.json();
+      },
+      runs: (params) => api.get(`/api/runs?${api._ep(params)}`),
+      run: (id) => api.get(`/api/runs/${id}?${api._ep()}`),
+      history: (id) => api.get(`/api/runs/${id}/history?${api._ep()}`),
+      traces: (id) => api.get(`/api/runs/${id}/traces?${api._ep()}`),
+      ask: (body) => api.post('/api/ask', { ...body, entity: _apiEntity, project: _apiProject }),
+      syncStatus: () => api.get('/api/sync_status'),
+      config: () => api.get('/api/config'),
+    };
+
+    // ---- Shared Components ----
+
+    // Semantic color classes that adapt to light/dark
+    const C = {
+      // Surfaces
+      bg: 'bg-white dark:bg-gray-950',
+      bgSoft: 'bg-gray-50 dark:bg-gray-900',
+      bgMuted: 'bg-gray-100 dark:bg-gray-800',
+      bgPanel: 'bg-gray-50/80 dark:bg-gray-900/50',
+      // Borders
+      border: 'border-gray-200 dark:border-gray-800',
+      borderSoft: 'border-gray-100 dark:border-gray-800/50',
+      // Text
+      text: 'text-gray-900 dark:text-gray-100',
+      textSecondary: 'text-gray-600 dark:text-gray-400',
+      textMuted: 'text-gray-400 dark:text-gray-500',
+      textFaint: 'text-gray-300 dark:text-gray-600',
+      // Interactive
+      hoverBg: 'hover:bg-gray-100 dark:hover:bg-gray-900/80',
+      activeBg: 'bg-gray-100 dark:bg-gray-800/50',
+      // Input
+      input: 'bg-gray-100 dark:bg-gray-900 border-gray-300 dark:border-gray-700 text-gray-900 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500',
+      // Button
+      btn: 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700',
+      btnActive: 'bg-brand-600 text-white',
+    };
+
+    function Badge({ children, color = 'gray' }) {
+      const colors = {
+        green: 'bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 border-green-300 dark:border-green-700/50',
+        red: 'bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300 border-red-300 dark:border-red-700/50',
+        yellow: 'bg-yellow-100 dark:bg-yellow-900/50 text-yellow-700 dark:text-yellow-300 border-yellow-300 dark:border-yellow-700/50',
+        blue: 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700/50',
+        purple: 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-700/50',
+        gray: 'bg-gray-100 dark:bg-gray-800/50 text-gray-600 dark:text-gray-300 border-gray-300 dark:border-gray-700/50',
+      };
+      return (
+        <span className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full border ${colors[color]}`}>
+          {children}
+        </span>
+      );
+    }
+
+    function StateIcon({ state }) {
+      if (state === 'running') return <span className="inline-block w-2 h-2 rounded-full bg-green-500 animate-pulse mr-1.5"></span>;
+      if (state === 'finished') return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 dark:bg-gray-500 mr-1.5"></span>;
+      if (state === 'crashed') return <span className="inline-block w-2 h-2 rounded-full bg-red-500 mr-1.5"></span>;
+      return <span className="inline-block w-2 h-2 rounded-full bg-yellow-500 mr-1.5"></span>;
+    }
+
+    function Spinner() {
+      return <div className="inline-block w-4 h-4 border-2 border-gray-300 dark:border-gray-600 border-t-brand-500 dark:border-t-brand-400 rounded-full animate-spin"></div>;
+    }
+
+    function ThemeToggle({ theme, setTheme }) {
+      return (
+        <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          className={`p-1.5 rounded-lg transition-colors ${C.btn}`}
+          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
+          {theme === 'dark' ? (
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+            </svg>
+          ) : (
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+            </svg>
+          )}
+        </button>
+      );
+    }
+
+    // ---- Run List ----
+    function RunList({ onSelectRun, selectedRunId, refreshTrigger }) {
+      const [runs, setRuns] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [search, setSearch] = useState('');
+      const [stateFilter, setStateFilter] = useState('');
+
+      const doFetch = async (s, f) => {
+        setLoading(true);
+        try {
+          const params = { limit: 50 };
+          if (f) params.state = f;
+          if (s) params.search = s;
+          const data = await api.runs(params);
+          setRuns(data);
+        } catch (e) {
+          console.error('Failed to fetch runs:', e);
+        }
+        setLoading(false);
+      };
+
+      useEffect(() => { doFetch(search, stateFilter); }, [stateFilter, search, refreshTrigger]);
+
+      return (
+        <div className="flex flex-col h-full">
+          <div className={`p-3 border-b ${C.border} space-y-2`}>
+            <input
+              type="text"
+              placeholder="Search runs..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && doFetch(search, stateFilter)}
+              className={`w-full px-3 py-1.5 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-brand-500 border ${C.input}`}
+            />
+            <div className="flex gap-1.5">
+              {['', 'running', 'finished', 'crashed'].map(s => (
+                <button key={s}
+                  onClick={() => setStateFilter(s)}
+                  className={`px-2 py-0.5 text-xs rounded-md transition-colors ${stateFilter === s ? C.btnActive : C.btn}`}>
+                  {s || 'All'}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto scrollbar-thin">
+            {loading ? (
+              <div className="flex items-center justify-center py-8"><Spinner /></div>
+            ) : runs.map(run => (
+              <button key={run.id}
+                onClick={() => onSelectRun(run)}
+                className={`w-full text-left px-3 py-2.5 border-b transition-colors ${C.borderSoft} ${
+                  selectedRunId === run.id ? `${C.activeBg}` : C.hoverBg
+                }`}>
+                <div className="flex items-center gap-1.5">
+                  <StateIcon state={run.state} />
+                  <span className={`text-sm font-medium truncate flex-1 ${C.text}`}>{run.display_name}</span>
+                </div>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className={`text-xs mono ${C.textMuted}`}>{run.id}</span>
+                  <Badge color={run.state === 'running' ? 'green' : run.state === 'finished' ? 'gray' : 'red'}>
+                    {run.state}
+                  </Badge>
+                  {run.history_count > 0 && (
+                    <span className={`text-xs ${C.textMuted}`}>{run.history_count} steps</span>
+                  )}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Metric Chart (simple SVG sparkline) ----
+    function Sparkline({ values, width = 120, height = 32, color = '#5c7cfa' }) {
+      if (!values || values.length < 2) return null;
+      const filtered = values.filter(v => v != null && !isNaN(v));
+      if (filtered.length < 2) return null;
+      const min = Math.min(...filtered);
+      const max = Math.max(...filtered);
+      const range = max - min || 1;
+      const points = filtered.map((v, i) => {
+        const x = (i / (filtered.length - 1)) * width;
+        const y = height - ((v - min) / range) * (height - 4) - 2;
+        return `${x},${y}`;
+      }).join(' ');
+      return (
+        <svg width={width} height={height} className="metric-sparkline">
+          <polyline fill="none" stroke={color} strokeWidth="1.5" points={points} />
+          <text x={width - 2} y={10} textAnchor="end" fill={color} fontSize="9" fontFamily="JetBrains Mono">
+            {filtered[filtered.length - 1]?.toFixed(3)}
+          </text>
+        </svg>
+      );
+    }
+
+    // ---- Run Detail Panel ----
+    function RunDetail({ run, onSelectTrace }) {
+      const [tab, setTab] = useState('metrics');
+      const [detail, setDetail] = useState(null);
+      const [history, setHistory] = useState(null);
+      const [traces, setTraces] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        setTab('metrics');
+        setDetail(null);
+        setHistory(null);
+        setTraces(null);
+        Promise.all([
+          api.run(run.id).then(setDetail).catch(e => console.warn('Run detail not available:', e.message)),
+          api.history(run.id).then(setHistory).catch(e => console.warn('History not available:', e.message)),
+        ]).finally(() => setLoading(false));
+      }, [run.id]);
+
+      const loadTraces = useCallback(() => {
+        if (traces && traces.source !== 'loading') return;
+        setTraces({ traces: [], count: 0, source: 'loading' });
+        api.traces(run.id).then(setTraces).catch(e => {
+          setTraces({ traces: [], count: 0, source: 'error', error: e.message });
+        });
+      }, [run.id, traces]);
+
+      useEffect(() => { if (tab === 'traces') loadTraces(); }, [tab, loadTraces]);
+
+      if (loading) return <div className="flex items-center justify-center h-full"><Spinner /></div>;
+
+      const metricGroups = {};
+      if (history?.keys) {
+        const numericKeys = history.keys.filter(k => {
+          if (k.startsWith('_') || k.startsWith('system/')) return false;
+          return history.rows.some(r => typeof r[k] === 'number' && isFinite(r[k]));
+        });
+        numericKeys.forEach(k => {
+          const prefix = k.includes('/') ? k.split('/').slice(0, -1).join('/') : 'other';
+          if (!metricGroups[prefix]) metricGroups[prefix] = [];
+          metricGroups[prefix].push(k);
+        });
+      }
+
+      return (
+        <div className="flex flex-col h-full fade-in">
+          {/* Header */}
+          <div className={`px-4 py-3 border-b ${C.border} ${C.bgPanel}`}>
+            <div className="flex items-center gap-2">
+              <StateIcon state={run.state} />
+              <h2 className={`text-lg font-semibold truncate ${C.text}`}>{run.display_name}</h2>
+              <Badge color={run.state === 'running' ? 'green' : 'gray'}>{run.state}</Badge>
+            </div>
+            <div className={`flex items-center gap-3 mt-1 text-xs ${C.textMuted}`}>
+              <span className="mono">{run.id}</span>
+              <span>{run.created_at?.slice(0, 19)}</span>
+              {detail?.url && (
+                <a href={detail.url} target="_blank" rel="noreferrer" className="text-brand-500 dark:text-brand-400 hover:underline">
+                  Open in W&B
+                </a>
+              )}
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div className={`flex border-b ${C.border} px-4`}>
+            {['metrics', 'config', 'traces'].map(t => (
+              <button key={t}
+                onClick={() => setTab(t)}
+                className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                  tab === t ? 'border-brand-500 text-brand-600 dark:text-brand-400' : `border-transparent ${C.textMuted} hover:text-gray-700 dark:hover:text-gray-300`
+                }`}>
+                {t.charAt(0).toUpperCase() + t.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          {/* Content */}
+          <div className="flex-1 overflow-y-auto scrollbar-thin p-4">
+            {tab === 'metrics' && <MetricsTab history={history} metricGroups={metricGroups} />}
+            {tab === 'config' && <ConfigTab detail={detail} />}
+            {tab === 'traces' && (traces?.source === 'loading' ? <div className="flex items-center gap-2"><Spinner /> <span className={C.textSecondary}>Loading traces...</span></div> : <TracesTab traces={traces} run={run} onSelectTrace={onSelectTrace} />)}
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Metrics Tab ----
+    function MetricsTab({ history, metricGroups }) {
+      const [expandedGroups, setExpandedGroups] = useState(new Set(['eval_autonomy', 'rollout_autonomy']));
+      const [selectedMetric, setSelectedMetric] = useState(null);
+
+      if (!history?.rows?.length) return <p className={C.textMuted}>No metrics logged yet.</p>;
+
+      const toggleGroup = (g) => {
+        const next = new Set(expandedGroups);
+        next.has(g) ? next.delete(g) : next.add(g);
+        setExpandedGroups(next);
+      };
+
+      const getValues = (key) => history.rows.map(r => r[key]).filter(v => v != null && typeof v === 'number' && isFinite(v));
+
+      const sortedGroups = Object.keys(metricGroups).sort((a, b) => {
+        if (a.startsWith('eval') && !b.startsWith('eval')) return -1;
+        if (!a.startsWith('eval') && b.startsWith('eval')) return 1;
+        return a.localeCompare(b);
+      });
+
+      return (
+        <div className="space-y-2">
+          {selectedMetric && (
+            <div className={`mb-4 p-3 rounded-lg border ${C.bgSoft} ${C.border}`}>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className={`text-sm font-medium mono ${C.text}`}>{selectedMetric}</h3>
+                <button onClick={() => setSelectedMetric(null)} className={`text-xs ${C.textMuted} hover:text-gray-600 dark:hover:text-gray-300`}>Close</button>
+              </div>
+              <Sparkline values={getValues(selectedMetric)} width={600} height={80} />
+              <div className={`flex gap-4 mt-2 text-xs ${C.textSecondary}`}>
+                {(() => {
+                  const vals = getValues(selectedMetric);
+                  return vals.length > 0 ? (
+                    <>
+                      <span>Min: {Math.min(...vals).toFixed(4)}</span>
+                      <span>Max: {Math.max(...vals).toFixed(4)}</span>
+                      <span>Last: {vals[vals.length - 1]?.toFixed(4)}</span>
+                      <span>Avg: {(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(4)}</span>
+                    </>
+                  ) : null;
+                })()}
+              </div>
+            </div>
+          )}
+          {sortedGroups.map(group => (
+            <div key={group} className={`border rounded-lg overflow-hidden ${C.border}`}>
+              <button onClick={() => toggleGroup(group)}
+                className={`w-full flex items-center justify-between px-3 py-2 transition-colors ${C.bgPanel} ${C.hoverBg}`}>
+                <span className={`text-sm font-medium ${C.textSecondary}`}>{group}</span>
+                <span className={`text-xs ${C.textMuted}`}>{metricGroups[group].length} metrics</span>
+              </button>
+              {expandedGroups.has(group) && (
+                <div className={`divide-y ${C.borderSoft}`}>
+                  {metricGroups[group].map(key => {
+                    const values = getValues(key);
+                    const last = values[values.length - 1];
+                    return (
+                      <button key={key}
+                        onClick={() => setSelectedMetric(key)}
+                        className={`w-full flex items-center justify-between px-3 py-1.5 text-left transition-colors ${C.hoverBg} ${
+                          selectedMetric === key ? C.activeBg : ''
+                        }`}>
+                        <span className={`text-xs mono truncate flex-1 mr-2 ${C.textSecondary}`}>{key.split('/').pop()}</span>
+                        <div className="flex items-center gap-2">
+                          <Sparkline values={values} width={80} height={20} color={key.includes('eval') ? '#10b981' : '#5c7cfa'} />
+                          <span className={`text-xs mono w-16 text-right ${C.text}`}>
+                            {last != null && typeof last === 'number' ? last.toFixed(4) : '-'}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ---- Config Tab ----
+    function ConfigTab({ detail }) {
+      if (!detail) return null;
+      const config = detail.config || {};
+      return (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+            {Object.entries(config).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => (
+              <div key={k} className="flex items-baseline gap-2 py-0.5">
+                <span className={`text-xs mono truncate ${C.textMuted}`}>{k}</span>
+                <span className={`text-xs mono truncate ${C.text}`}>{JSON.stringify(v)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Traces Tab ----
+    function TracesTab({ traces, run, onSelectTrace }) {
+      const [selected, _setSelected] = useState(null);
+      const [pastedData, setPastedData] = useState(null);
+      const [pasteMode, setPasteMode] = useState(false);
+      const [pasteText, setPasteText] = useState('');
+      const [pasteError, setPasteError] = useState('');
+      const [stepFilter, setStepFilter] = useState('all');
+      const [rewardFilter, setRewardFilter] = useState('all');
+
+      const setSelected = (trace) => {
+        _setSelected(trace);
+        if (onSelectTrace) onSelectTrace(trace);
+      };
+
+      const handlePaste = () => {
+        setPasteError('');
+        try {
+          const data = JSON.parse(pasteText);
+          let traces = [];
+          if (Array.isArray(data)) {
+            traces = data.map(parsePastedTrace);
+          } else if (data.inputs?.something) {
+            traces = [parsePastedTrace(data)];
+          } else if (data.metadata?.logging_info) {
+            traces = [parsePastedTrace({ inputs: { something: data } })];
+          } else if (data.messages || data.trajectory) {
+            traces = [{ ...data, id: 'pasted' }];
+          } else {
+            traces = [parsePastedTrace(data)];
+          }
+          setPastedData({ traces, count: traces.length, source: 'pasted' });
+          setPasteMode(false);
+        } catch (e) {
+          setPasteError(`Parse error: ${e.message}`);
+        }
+      };
+
+      const allTraces = pastedData || traces;
+      const hasTraces = allTraces?.traces?.length > 0;
+      const steps = [...new Set((allTraces?.traces || []).map(t => t.step).filter(s => s != null))].sort((a, b) => b - a);
+
+      let filteredTraces = allTraces?.traces || [];
+      if (stepFilter !== 'all') filteredTraces = filteredTraces.filter(t => String(t.step) === stepFilter);
+      if (rewardFilter === 'success') filteredTraces = filteredTraces.filter(t => t.reward > 0);
+      if (rewardFilter === 'fail') filteredTraces = filteredTraces.filter(t => t.reward === 0 || t.reward === 0.0);
+
+      const successCount = (allTraces?.traces || []).filter(t => t.reward > 0).length;
+      const totalCount = allTraces?.traces?.length || 0;
+
+      if (selected) {
+        return <TraceDetail trace={selected} onBack={() => setSelected(null)} />;
+      }
+
+      return (
+        <div className="space-y-3 fade-in">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={() => setPasteMode(!pasteMode)}
+              className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${pasteMode ? 'bg-purple-100 dark:bg-purple-600/20 border-purple-300 dark:border-purple-500/30 text-purple-600 dark:text-purple-400' : `${C.btn} border ${C.border}`}`}>
+              {pasteMode ? 'Cancel' : 'Paste Trajectory JSON'}
+            </button>
+            {pastedData && (
+              <button onClick={() => setPastedData(null)}
+                className={`px-3 py-1.5 text-xs rounded-lg border ${C.btn} ${C.border}`}>
+                Clear pasted
+              </button>
+            )}
+          </div>
+
+          {hasTraces && (
+            <div className="flex items-center gap-3 text-xs">
+              <span className={C.textSecondary}>{totalCount} traces from <span className="text-brand-500 dark:text-brand-400">{allTraces.source}</span></span>
+              <span className="text-green-600 dark:text-green-400">{successCount} success ({totalCount > 0 ? (100 * successCount / totalCount).toFixed(0) : 0}%)</span>
+              <span className="text-red-600 dark:text-red-400">{totalCount - successCount} fail</span>
+            </div>
+          )}
+
+          {hasTraces && (
+            <div className="flex items-center gap-2 flex-wrap">
+              {steps.length > 1 && (
+                <select value={stepFilter} onChange={e => setStepFilter(e.target.value)}
+                  className={`px-2 py-1 text-xs rounded border focus:outline-none ${C.input}`}>
+                  <option value="all">All steps ({steps.length})</option>
+                  {steps.map(s => <option key={s} value={String(s)}>Step {s}</option>)}
+                </select>
+              )}
+              <div className="flex gap-1">
+                {['all', 'success', 'fail'].map(f => (
+                  <button key={f} onClick={() => setRewardFilter(f)}
+                    className={`px-2 py-0.5 text-xs rounded transition-colors ${rewardFilter === f ? C.btnActive : C.btn}`}>
+                    {f === 'all' ? 'All' : f === 'success' ? 'Success' : 'Fail'}
+                  </button>
+                ))}
+              </div>
+              <span className={`text-xs ml-auto ${C.textFaint}`}>{filteredTraces.length} shown</span>
+            </div>
+          )}
+
+          {!hasTraces && !pasteMode && (
+            <div className={`p-4 text-center text-sm ${C.textMuted}`}>
+              No trajectory artifacts found for this run. Run <code className={`mono ${C.textSecondary}`}>python sync.py --run-id {run?.id}</code> to sync.
+            </div>
+          )}
+
+          {pasteMode && (
+            <div className="space-y-2">
+              <textarea value={pasteText} onChange={e => setPasteText(e.target.value)}
+                placeholder="Paste trajectory JSON here..."
+                className={`w-full h-48 px-3 py-2 rounded-lg text-xs mono resize-y border focus:outline-none focus:ring-1 focus:ring-purple-500 ${C.input}`} />
+              {pasteError && <p className="text-xs text-red-500">{pasteError}</p>}
+              <button onClick={handlePaste} disabled={!pasteText.trim()}
+                className="px-4 py-1.5 text-xs bg-purple-600 text-white rounded-lg hover:bg-purple-500 disabled:opacity-50">
+                Parse & View
+              </button>
+            </div>
+          )}
+
+          {filteredTraces.length > 0 && (
+            <div className="space-y-1">
+              {filteredTraces.map((t, i) => (
+                <button key={t.id || i}
+                  onClick={() => setSelected(t)}
+                  className={`w-full text-left p-2.5 rounded-lg border transition-colors ${C.border} ${C.hoverBg}`}>
+                  <div className="flex items-center gap-2">
+                    <Badge color={t.reward > 0 ? 'green' : t.reward === 0 ? 'red' : 'gray'}>
+                      R={t.reward ?? '?'}
+                    </Badge>
+                    {t.status && <Badge color={t.status === 'COMPLETED' ? 'green' : t.status === 'TRUNCATED' ? 'yellow' : 'red'}>{t.status}</Badge>}
+                    {t.n_turns != null && <span className={`text-xs ${C.textMuted}`}>{t.n_turns} turns</span>}
+                    {t.failure_reason && t.failure_reason !== 'none' && t.failure_reason !== '' && (
+                      <Badge color="red">{t.failure_reason}</Badge>
+                    )}
+                    {t.verifier_outcome && <Badge color={t.verifier_outcome === 'Correct' ? 'green' : 'purple'}>{t.verifier_outcome}</Badge>}
+                    {t.step != null && <span className={`text-xs ml-auto ${C.textFaint}`}>step {t.step}</span>}
+                    {t.duration > 0 && <span className={`text-xs ${C.textFaint}`}>{Math.round(t.duration)}s</span>}
+                  </div>
+                  <p className={`text-xs mt-1 truncate mono ${C.textSecondary}`}>{t.prompt}</p>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function parsePastedTrace(data) {
+      const sample = data.inputs?.something || data;
+      const metadata = sample.metadata || {};
+      const logging_info = metadata.logging_info || {};
+      return {
+        id: data.id || 'pasted', started_at: data.started_at || '',
+        prompt: String(sample.prompt || metadata.prompt || '').slice(0, 500),
+        reward: sample.reward ?? logging_info.env_reward,
+        n_turns: logging_info.n_turns, failure_reason: logging_info.failure_reason,
+        done: logging_info.done, trajectory: logging_info.trajectory || '',
+        verification: logging_info.verification,
+        messages: metadata.messages || sample.messages || [],
+      };
+    }
+
+    // ---- Trace Detail ----
+    function TraceDetail({ trace, onBack }) {
+      const trajectory = trace.trajectory || '';
+      const messages = trace.messages || [];
+      const [viewMode, setViewMode] = useState(messages.length > 0 ? 'messages' : 'text');
+
+      const StatCard = ({ label, children, className = '' }) => (
+        <div className={`p-2 rounded-lg border ${C.bgSoft} ${C.border} ${className}`}>
+          <div className={`text-xs ${C.textMuted}`}>{label}</div>
+          {children}
+        </div>
+      );
+
+      const MiniStat = ({ label, value }) => (
+        <div className={`p-1.5 rounded border text-center ${C.bgPanel} ${C.borderSoft}`}>
+          <div className={`text-[10px] ${C.textFaint}`}>{label}</div>
+          <div className={`text-xs mono ${C.text}`}>{value}</div>
+        </div>
+      );
+
+      return (
+        <div className="space-y-3 fade-in">
+          <button onClick={onBack} className="text-xs text-brand-500 dark:text-brand-400 hover:underline">&larr; Back to traces</button>
+
+          <div className="grid grid-cols-4 gap-3">
+            <StatCard label="Reward">
+              <div className={`text-lg font-semibold ${trace.reward > 0 ? 'text-green-600 dark:text-green-400' : trace.reward === 0 ? 'text-red-600 dark:text-red-400' : C.textSecondary}`}>
+                {trace.reward ?? 'N/A'}
+              </div>
+            </StatCard>
+            <StatCard label="Turns / Tool Calls">
+              <div className={`text-lg font-semibold ${C.text}`}>{trace.n_turns ?? '?'} <span className={`text-sm ${C.textMuted}`}>/ {trace.num_tool_calls ?? '?'}</span></div>
+            </StatCard>
+            <StatCard label="Status">
+              <div className={`text-sm font-medium ${trace.status === 'COMPLETED' ? 'text-green-600 dark:text-green-400' : trace.status === 'TRUNCATED' ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-600 dark:text-red-400'}`}>
+                {trace.status || (trace.done ? 'Completed' : 'Incomplete')}
+              </div>
+            </StatCard>
+            <StatCard label="Failure">
+              <div className={`text-sm font-medium ${C.text}`}>{trace.failure_reason || 'none'}</div>
+            </StatCard>
+          </div>
+
+          <div className="grid grid-cols-5 gap-2">
+            {trace.duration > 0 && <MiniStat label="Duration" value={`${Math.round(trace.duration)}s`} />}
+            {trace.time_agent_invoke > 0 && <MiniStat label="Agent" value={`${Math.round(trace.time_agent_invoke)}s`} />}
+            {trace.time_env_create > 0 && <MiniStat label="Env Create" value={`${Number(trace.time_env_create).toFixed(1)}s`} />}
+            {trace.time_verify > 0 && <MiniStat label="Verify" value={`${Number(trace.time_verify).toFixed(1)}s`} />}
+            {trace.response_length > 0 && <MiniStat label="Resp Len" value={trace.response_length.toLocaleString()} />}
+            {trace.step != null && <MiniStat label="Step" value={trace.step} />}
+            {trace.verifier_outcome && (
+              <div className={`p-1.5 rounded border text-center ${C.bgPanel} ${C.borderSoft}`}>
+                <div className={`text-[10px] ${C.textFaint}`}>Verifier</div>
+                <div className={`text-xs mono ${trace.verifier_outcome === 'Correct' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>{trace.verifier_outcome}</div>
+              </div>
+            )}
+          </div>
+
+          {trace.error && (
+            <div className="p-2 rounded-lg border bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-700/30">
+              <div className="text-xs font-medium text-red-600 dark:text-red-400">Error</div>
+              <pre className="text-xs text-red-800 dark:text-gray-400 mt-1 mono whitespace-pre-wrap max-h-[200px] overflow-y-auto scrollbar-thin">{trace.error}</pre>
+            </div>
+          )}
+
+          {trace.verification && (
+            <div className={`p-2 rounded-lg border ${trace.verification.success ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-700/30' : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-700/30'}`}>
+              <span className="text-xs font-medium" style={{color: trace.verification.success ? '#16a34a' : '#dc2626'}}>
+                Verification: {trace.verification.success ? 'PASS' : 'FAIL'} (reward={trace.verification.reward})
+              </span>
+            </div>
+          )}
+
+          {trace.grader_responses && (
+            <div className="p-2 rounded-lg border bg-purple-50 dark:bg-purple-900/10 border-purple-200 dark:border-purple-800/30">
+              <div className="text-xs font-medium text-purple-600 dark:text-purple-400 mb-1">Grader Responses</div>
+              <pre className={`text-xs mono whitespace-pre-wrap max-h-[200px] overflow-y-auto scrollbar-thin ${C.textSecondary}`}>{trace.grader_responses}</pre>
+            </div>
+          )}
+
+          {trace.prompt && (
+            <div className={`p-3 rounded-lg border ${C.bgSoft} ${C.border}`}>
+              <div className={`text-xs mb-1 ${C.textMuted}`}>Prompt</div>
+              <pre className={`text-sm mono whitespace-pre-wrap max-h-[300px] overflow-y-auto scrollbar-thin ${C.text}`}>{trace.prompt}</pre>
+            </div>
+          )}
+
+          {trace.label && (
+            <div className={`p-3 rounded-lg border ${C.bgSoft} ${C.border}`}>
+              <div className={`text-xs mb-1 ${C.textMuted}`}>Label / Ground Truth</div>
+              <pre className={`text-sm mono whitespace-pre-wrap max-h-[300px] overflow-y-auto scrollbar-thin ${C.text}`}>{trace.label}</pre>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2">
+            <h3 className={`text-sm font-medium ${C.textSecondary}`}>Trajectory</h3>
+            <div className="flex gap-1 ml-2">
+              {messages.length > 0 && (
+                <button onClick={() => setViewMode('messages')}
+                  className={`px-2 py-0.5 text-xs rounded ${viewMode === 'messages' ? C.btnActive : C.btn}`}>
+                  Messages ({messages.length})
+                </button>
+              )}
+              {trajectory && (
+                <button onClick={() => setViewMode('text')}
+                  className={`px-2 py-0.5 text-xs rounded ${viewMode === 'text' ? C.btnActive : C.btn}`}>
+                  Text
+                </button>
+              )}
+            </div>
+          </div>
+
+          {viewMode === 'messages' && messages.length > 0 ? (
+            <MessagesView messages={messages} />
+          ) : trajectory ? (
+            <TrajectoryTextView trajectory={trajectory} />
+          ) : (
+            <p className={`text-xs ${C.textMuted}`}>No trajectory data available</p>
+          )}
+        </div>
+      );
+    }
+
+    // ---- Strands Messages Viewer ----
+    function MessagesView({ messages }) {
+      return (
+        <div className="space-y-1">
+          {messages.map((msg, i) => <MessageBlock key={i} message={msg} index={i} />)}
+        </div>
+      );
+    }
+
+    function MessageBlock({ message, index }) {
+      const [expanded, setExpanded] = useState(index < 6);
+      const role = message.role || 'unknown';
+      const content = message.content || [];
+      const isUser = role === 'user';
+      const hasToolUse = content.some(b => b.toolUse);
+      const hasToolResult = content.some(b => b.toolResult);
+      const borderClass = isUser ? (hasToolResult ? 'turn-tool-result' : 'turn-user') : 'turn-assistant';
+      const labelColor = isUser ? (hasToolResult ? '#f59e0b' : '#3b82f6') : '#10b981';
+      let label = isUser ? 'User' : 'Assistant';
+      if (hasToolResult) label = 'Tool Result';
+      if (hasToolUse) label += ' + Tool Call';
+      const textBlocks = content.filter(b => b.text).map(b => b.text);
+      const toolNames = content.filter(b => b.toolUse).map(b => b.toolUse.name);
+      const preview = (toolNames.length > 0 ? `[${toolNames.join(', ')}] ` : '') + textBlocks.join(' ').slice(0, 120);
+
+      return (
+        <div className={`${borderClass} pl-3 py-1 mb-0.5`}>
+          <button onClick={() => setExpanded(!expanded)} className="flex items-center gap-2 w-full text-left">
+            <span className="text-xs font-medium shrink-0" style={{ color: labelColor }}>{label}</span>
+            <span className={`text-xs ${C.textFaint}`}>{expanded ? '▾' : '▸'}</span>
+            {!expanded && <span className={`text-xs truncate flex-1 ${C.textFaint}`}>{preview}</span>}
+          </button>
+          {expanded && (
+            <div className="mt-1 space-y-1">
+              {content.map((block, bi) => <ContentBlock key={bi} block={block} />)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function ContentBlock({ block }) {
+      if (block.text) {
+        return <pre className={`text-xs mono trajectory-block whitespace-pre-wrap max-h-[400px] overflow-y-auto scrollbar-thin ${C.text}`}>{block.text}</pre>;
+      }
+      if (block.toolUse) {
+        const tu = block.toolUse;
+        return (
+          <div className="ml-2 p-2 bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30 rounded">
+            <div className="text-xs font-medium text-blue-600 dark:text-blue-400">Tool Call: {tu.name}</div>
+            <pre className={`text-xs mono mt-1 whitespace-pre-wrap max-h-[200px] overflow-y-auto scrollbar-thin ${C.textSecondary}`}>
+              {typeof tu.input === 'string' ? tu.input : JSON.stringify(tu.input, null, 2)}
+            </pre>
+          </div>
+        );
+      }
+      if (block.toolResult) {
+        const tr = block.toolResult;
+        const resultContent = tr.content || [];
+        const status = tr.status || 'success';
+        return (
+          <div className={`ml-2 p-2 rounded border ${status === 'error' ? 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-800/30' : 'bg-yellow-50 dark:bg-yellow-900/10 border-yellow-200 dark:border-yellow-800/30'}`}>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium" style={{color: status === 'error' ? '#dc2626' : '#d97706'}}>
+                Tool Result: {tr.toolUseId?.slice(0, 12) || '?'}
+              </span>
+              {status === 'error' && <Badge color="red">error</Badge>}
+            </div>
+            {resultContent.map((rc, rci) => (
+              <pre key={rci} className={`text-xs mono mt-1 whitespace-pre-wrap max-h-[300px] overflow-y-auto scrollbar-thin ${C.textSecondary}`}>
+                {rc.text || JSON.stringify(rc, null, 2)}
+              </pre>
+            ))}
+          </div>
+        );
+      }
+      return null;
+    }
+
+    // ---- Text Trajectory View ----
+    function TrajectoryTextView({ trajectory }) {
+      const [showRaw, setShowRaw] = useState(false);
+      const turns = parseTrajectory(trajectory);
+
+      return (
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <button onClick={() => setShowRaw(!showRaw)}
+              className={`px-2 py-0.5 text-xs rounded ${showRaw ? `${C.bgMuted} ${C.text}` : C.btn}`}>
+              {showRaw ? 'Parsed View' : 'Raw Text'}
+            </button>
+          </div>
+          {showRaw ? (
+            <pre className={`text-xs mono trajectory-block p-3 rounded-lg border max-h-[600px] overflow-y-auto scrollbar-thin ${C.bgSoft} ${C.border} ${C.textSecondary}`}>
+              {trajectory}
+            </pre>
+          ) : turns.length === 0 ? (
+            <pre className={`text-xs mono trajectory-block p-3 rounded-lg border max-h-[600px] overflow-y-auto scrollbar-thin ${C.bgSoft} ${C.border} ${C.textSecondary}`}>
+              {trajectory}
+            </pre>
+          ) : (
+            <div className="space-y-1">
+              {turns.map((turn, i) => <TurnBlock key={i} turn={turn} index={i} />)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function SubPartBlock({ part }) {
+      if (part.type === 'tool-call') {
+        return (
+          <div className="p-2 bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30 rounded my-1">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-xs font-medium text-blue-600 dark:text-blue-400">Tool Call</span>
+              {part.toolName && <Badge color="blue">{part.toolName}</Badge>}
+            </div>
+            <pre className={`text-xs mono whitespace-pre-wrap max-h-[200px] overflow-y-auto scrollbar-thin ${C.textSecondary}`}>{part.toolInput || part.content}</pre>
+          </div>
+        );
+      }
+      if (part.type === 'tool-result') {
+        return (
+          <div className="p-2 bg-yellow-50 dark:bg-yellow-900/10 border border-yellow-200 dark:border-yellow-800/30 rounded my-1">
+            <div className="text-xs font-medium text-yellow-600 dark:text-yellow-400 mb-1">{part.label || 'Tool Result'}</div>
+            <pre className={`text-xs mono whitespace-pre-wrap max-h-[300px] overflow-y-auto scrollbar-thin ${C.textSecondary}`}>{part.content}</pre>
+          </div>
+        );
+      }
+      return (
+        <pre className={`text-xs mono trajectory-block max-h-[400px] overflow-y-auto scrollbar-thin whitespace-pre-wrap my-1 ${C.textSecondary}`}>{part.content}</pre>
+      );
+    }
+
+    function TurnBlock({ turn, index }) {
+      const [expanded, setExpanded] = useState(index < 5);
+      const borderClass = { user: 'turn-user', assistant: 'turn-assistant', error: 'turn-error', verification: 'turn-verification' }[turn.type] || '';
+      const labelColor = { user: '#3b82f6', assistant: '#10b981', error: '#ef4444', verification: '#8b5cf6' }[turn.type] || '#9ca3af';
+      const toolCalls = (turn.subParts || []).filter(p => p.type === 'tool-call');
+
+      return (
+        <div className={`${borderClass} pl-3 py-1.5 mb-1 rounded-r`}>
+          <button onClick={() => setExpanded(!expanded)} className="flex items-center gap-2 w-full text-left">
+            {turn.turnNum && (
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0 ${C.bgMuted} ${C.textFaint}`}>#{turn.turnNum}</span>
+            )}
+            <span className="text-xs font-medium shrink-0" style={{ color: labelColor }}>
+              {turn.type === 'user' ? 'User' : turn.type === 'assistant' ? 'Agent' : turn.label}
+            </span>
+            {toolCalls.length > 0 && (
+              <span className="flex items-center gap-1">
+                {toolCalls.slice(0, 3).map((tc, i) => <Badge key={i} color="blue">{tc.toolName || 'tool'}</Badge>)}
+                {toolCalls.length > 3 && <span className={`text-xs ${C.textFaint}`}>+{toolCalls.length - 3}</span>}
+              </span>
+            )}
+            <span className={`text-xs ${C.textFaint}`}>{expanded ? '\u25BE' : '\u25B8'}</span>
+            {!expanded && <span className={`text-xs truncate flex-1 ${C.textFaint}`}>{turn.preview}</span>}
+          </button>
+          {expanded && (
+            <div className="mt-1.5 ml-1">
+              {turn.subParts && turn.subParts.length > 0 ? (
+                turn.subParts.map((part, i) => <SubPartBlock key={i} part={part} />)
+              ) : turn.type === 'error' ? (
+                <div className="p-2 bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800/30 rounded">
+                  <pre className="text-xs text-red-700 dark:text-red-300/80 mono whitespace-pre-wrap max-h-[200px] overflow-y-auto scrollbar-thin">{turn.content}</pre>
+                </div>
+              ) : (
+                <pre className={`text-xs mono trajectory-block max-h-[400px] overflow-y-auto scrollbar-thin whitespace-pre-wrap ${C.textSecondary}`}>
+                  {turn.content}
+                </pre>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function parseTrajectory(text) {
+      if (!text) return [];
+      const turns = [];
+      const lines = text.split('\n');
+      let currentTurn = null;
+      let buffer = [];
+
+      const flush = () => {
+        if (currentTurn) {
+          let rawContent = buffer.join('\n').trim();
+          rawContent = rawContent.replace(/<\|im_start\|>\w+\n?/g, '').replace(/<\|im_end\|>/g, '').trim();
+          currentTurn.content = rawContent;
+          currentTurn.preview = rawContent.replace(/\n/g, ' ').slice(0, 120);
+
+          if (currentTurn.type === 'assistant' && rawContent) {
+            const parsed = parseAgentOutput(rawContent);
+            currentTurn.subParts = parsed;
+            const firstText = parsed.find(p => p.type === 'assistant');
+            const toolNames = parsed.filter(p => p.type === 'tool-call').map(p => p.toolName).filter(Boolean);
+            currentTurn.preview = (toolNames.length > 0 ? `[${toolNames.join(', ')}] ` : '') +
+              (firstText ? firstText.content.replace(/\n/g, ' ').slice(0, 100) : rawContent.replace(/\n/g, ' ').slice(0, 120));
+          }
+
+          if (currentTurn.type === 'user' && rawContent) {
+            const toolResultMatch = rawContent.match(/\[Tool Result: (\w+)\]\s*([\s\S]*)/);
+            if (toolResultMatch) {
+              const beforeResult = rawContent.slice(0, rawContent.indexOf('[Tool Result:')).trim();
+              const subParts = [];
+              if (beforeResult) {
+                subParts.push({ type: 'text', label: 'User', content: beforeResult, preview: beforeResult.replace(/\n/g, ' ').slice(0, 120) });
+              }
+              subParts.push({
+                type: 'tool-result', label: `Tool Result (${toolResultMatch[1]})`,
+                content: toolResultMatch[2].trim(),
+                preview: toolResultMatch[2].trim().replace(/\n/g, ' ').slice(0, 120),
+              });
+              currentTurn.subParts = subParts;
+              currentTurn.preview = `Tool Result (${toolResultMatch[1]})`;
+            }
+          }
+
+          turns.push(currentTurn);
+        }
+        buffer = [];
+        currentTurn = null;
+      };
+
+      for (const line of lines) {
+        if (line.match(/^-+\s*Turn\s+\d+:\s*User Input\s*-+$/i)) {
+          flush();
+          const num = line.match(/Turn\s+(\d+)/i)?.[1] || '?';
+          currentTurn = { type: 'user', label: 'User', turnNum: num, content: '', preview: '', subParts: null };
+        } else if (line.match(/^-+\s*Turn\s+\d+:\s*Agent Output\s*-+$/i)) {
+          flush();
+          const num = line.match(/Turn\s+(\d+)/i)?.[1] || '?';
+          currentTurn = { type: 'assistant', label: 'Agent', turnNum: num, content: '', preview: '', subParts: null };
+        } else if (line.match(/^-+\s*ERROR\s*-+$/i)) {
+          flush();
+          currentTurn = { type: 'error', label: 'Error', turnNum: null, content: '', preview: '', subParts: null };
+        } else if (line.match(/^-+\s*VERIFICATION\s*-+$/i)) {
+          flush();
+          currentTurn = { type: 'verification', label: 'Verification', turnNum: null, content: '', preview: '', subParts: null };
+        } else if (line.match(/^={80}$/) || line.match(/^TRAJECTORY LOG$/)) {
+          // Skip header lines
+        } else {
+          buffer.push(line);
+        }
+      }
+      flush();
+      return turns;
+    }
+
+    function parseAgentOutput(text) {
+      const parts = [];
+
+      // Format 1: XML tool_call blocks
+      const xmlToolCallRegex = /<tool_call>\s*<function=(\w+)>([\s\S]*?)<\/function>\s*<\/tool_call>/g;
+      const hasXmlToolCalls = xmlToolCallRegex.test(text);
+      xmlToolCallRegex.lastIndex = 0;
+
+      if (hasXmlToolCalls) {
+        let lastIndex = 0;
+        let match;
+        while ((match = xmlToolCallRegex.exec(text)) !== null) {
+          const before = text.slice(lastIndex, match.index).trim();
+          if (before) {
+            parts.push({ type: 'assistant', label: 'Agent', content: before, preview: before.replace(/\n/g, ' ').slice(0, 120) });
+          }
+          const toolName = match[1];
+          const toolBody = match[2].trim();
+          const paramRegex = /<parameter=(\w+)>([\s\S]*?)<\/parameter>/g;
+          const params = {};
+          let pm;
+          while ((pm = paramRegex.exec(toolBody)) !== null) { params[pm[1]] = pm[2]; }
+          const paramStr = Object.keys(params).length > 0
+            ? Object.entries(params).map(([k, v]) => `${k}:\n${v}`).join('\n\n') : toolBody;
+          parts.push({ type: 'tool-call', label: 'Tool Call', toolName, content: paramStr, toolInput: paramStr,
+            preview: `${toolName}(${Object.keys(params).join(', ')})`.slice(0, 120) });
+          lastIndex = match.index + match[0].length;
+        }
+        const after = text.slice(lastIndex).trim();
+        if (after) parts.push({ type: 'assistant', label: 'Agent', content: after, preview: after.replace(/\n/g, ' ').slice(0, 120) });
+        if (parts.length > 0) return parts;
+      }
+
+      // Format 2: [Tool Call: name] Input: {...}
+      const bracketToolRegex = /\[Tool Call: (\w+)\]\s*Input:\s*(\{[\s\S]*?\})/g;
+      const hasBracketTools = bracketToolRegex.test(text);
+      bracketToolRegex.lastIndex = 0;
+      if (hasBracketTools) {
+        let lastIndex = 0;
+        let match;
+        while ((match = bracketToolRegex.exec(text)) !== null) {
+          const before = text.slice(lastIndex, match.index).trim();
+          if (before) parts.push({ type: 'tool-result', label: 'Tool Result', content: before, preview: before.replace(/\n/g, ' ').slice(0, 120) });
+          const toolName = match[1];
+          let inputStr = match[2];
+          try { const parsed = JSON.parse(inputStr.replace(/'/g, '"')); inputStr = Object.entries(parsed).map(([k, v]) => `${k}:\n${v}`).join('\n\n'); } catch(e) {}
+          parts.push({ type: 'tool-call', label: 'Tool Call', toolName, content: inputStr, toolInput: inputStr, preview: `${toolName}(...)`.slice(0, 120) });
+          lastIndex = match.index + match[0].length;
+        }
+        const after = text.slice(lastIndex).trim();
+        if (after) parts.push({ type: 'assistant', label: 'Agent', content: after, preview: after.replace(/\n/g, ' ').slice(0, 120) });
+        if (parts.length > 0) return parts;
+      }
+
+      // Format 3: [Tool Use: name] ... [Tool Result] (strands)
+      const strandsMarkers = text.split(/(\[Tool Use: \w+\]|\[Tool Result[^\]]*\])/);
+      if (strandsMarkers.length > 1) {
+        let currentLabel = 'Agent', currentType = 'assistant', currentToolName = null;
+        for (const part of strandsMarkers) {
+          const toolUseMatch = part.match(/\[Tool Use: (\w+)\]/);
+          const toolResultMatch = part.match(/\[Tool Result/);
+          if (toolUseMatch) { currentLabel = 'Tool Call'; currentType = 'tool-call'; currentToolName = toolUseMatch[1]; }
+          else if (toolResultMatch) { currentLabel = 'Tool Result'; currentType = 'tool-result'; currentToolName = null; }
+          else if (part.trim()) {
+            parts.push({ type: currentType, label: currentLabel, content: part.trim(), preview: part.trim().replace(/\n/g, ' ').slice(0, 120), toolName: currentToolName });
+            currentLabel = 'Agent'; currentType = 'assistant'; currentToolName = null;
+          }
+        }
+        if (parts.length > 0) return parts;
+      }
+
+      return [{ type: 'assistant', label: 'Agent', content: text, preview: text.replace(/\n/g, ' ').slice(0, 120) }];
+    }
+
+    // ---- AI Assistant Sidebar ----
+    function AskSidebar({ run, trace }) {
+      const [messages, setMessages] = useState([]);
+      const [input, setInput] = useState('');
+      const [loading, setLoading] = useState(false);
+      const bottomRef = useRef(null);
+      const prevRunId = useRef(null);
+
+      useEffect(() => {
+        if (run?.id !== prevRunId.current) { setMessages([]); prevRunId.current = run?.id; }
+      }, [run?.id]);
+
+      const buildTraceContext = () => {
+        if (!trace) return '';
+        const parts = [];
+        parts.push(`Selected trajectory: dataset=${trace.dataset_name || 'unknown'}, reward=${trace.reward}, env_reward=${trace.env_reward}, status=${trace.status || 'unknown'}, turns=${trace.n_turns}, tool_calls=${trace.num_tool_calls}, failure_reason=${trace.failure_reason || 'none'}`);
+        if (trace.duration) parts.push(`Timing: total=${Math.round(trace.duration)}s, env_create=${Math.round(trace.time_env_create || 0)}s, agent=${Math.round(trace.time_agent_invoke || 0)}s, verify=${Math.round(trace.time_verify || 0)}s, cleanup=${Math.round(trace.time_cleanup || 0)}s`);
+        if (trace.verifier_outcome) parts.push(`Verifier outcome: ${trace.verifier_outcome}`);
+        if (trace.grader_responses) parts.push(`Grader responses: ${typeof trace.grader_responses === 'string' ? trace.grader_responses.slice(0, 2000) : JSON.stringify(trace.grader_responses).slice(0, 2000)}`);
+        if (trace.error) parts.push(`Error: ${trace.error}`);
+        if (trace.prompt) parts.push(`Task prompt: ${trace.prompt}`);
+        if (trace.label) parts.push(`Expected label/answer: ${trace.label}`);
+        if (trace.trajectory) {
+          // Send full trajectory (up to 100k chars - Bedrock supports large context)
+          const maxLen = 100000;
+          const traj = trace.trajectory.length > maxLen
+            ? trace.trajectory.slice(0, maxLen) + '\n... [trajectory truncated at 100k chars]'
+            : trace.trajectory;
+          parts.push(`Full trajectory log (${trace.trajectory.length} chars):\n${traj}`);
+        }
+        return parts.join('\n');
+      };
+
+      const send = async () => {
+        if (!input.trim() || loading) return;
+        const question = input.trim();
+        setInput('');
+        setMessages(prev => [...prev, { role: 'user', content: question }]);
+        setLoading(true);
+        try {
+          const traceCtx = buildTraceContext();
+          const resp = await api.ask({ question, run_id: run?.id, context: traceCtx || undefined });
+          setMessages(prev => [...prev, { role: 'assistant', content: resp.answer }]);
+        } catch (e) {
+          setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${e.message}` }]);
+        }
+        setLoading(false);
+      };
+
+      useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+      const suggestions = trace ? [
+        "Did the agent actually solve the problem? Analyze step by step.",
+        "What was inefficient? How could this be done in fewer turns?",
+        "Summarize what the agent did in each phase of the trajectory.",
+        "What patterns (good or bad) do you see in the agent's behavior?",
+      ] : run ? [
+        "How is this run performing?",
+        "What are the failure reasons?",
+        "Is the reward improving?",
+        "What should I try next?",
+      ] : [
+        "Compare recent runs",
+        "What's the best performing run?",
+      ];
+
+      return (
+        <div className="flex flex-col h-full">
+          <div className={`px-3 py-2 border-b ${C.border} shrink-0`}>
+            <span className={`text-xs font-medium ${C.textSecondary}`}>AI Assistant</span>
+            {run && <span className={`text-xs ml-1 ${C.textFaint}`}>({run.display_name?.slice(0, 20)}...)</span>}
+          </div>
+          <div className="flex-1 overflow-y-auto p-3 scrollbar-thin space-y-2">
+            {messages.length === 0 && (
+              <div className="space-y-2">
+                <p className={`text-xs ${C.textMuted}`}>{run ? 'Ask about this run.' : 'Select a run to ask about it.'}</p>
+                <div className="flex flex-col gap-1">
+                  {suggestions.map(s => (
+                    <button key={s} onClick={() => { setInput(s); }}
+                      className={`text-left px-2 py-1 text-xs rounded border transition-colors ${C.bgSoft} ${C.border} ${C.textSecondary} ${C.hoverBg}`}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {messages.map((msg, i) => (
+              <div key={i} className={`${msg.role === 'user' ? 'text-right' : ''}`}>
+                <div className={`inline-block max-w-full px-2.5 py-1.5 rounded-lg text-xs border ${
+                  msg.role === 'user'
+                    ? 'bg-brand-100 dark:bg-brand-600/30 text-brand-800 dark:text-gray-200 border-brand-200 dark:border-brand-500/30'
+                    : `${C.bgSoft} ${C.text} ${C.border}`
+                }`}>
+                  {msg.role === 'assistant' ? (
+                    <div className="ai-msg" dangerouslySetInnerHTML={{ __html: marked.parse(msg.content) }} />
+                  ) : msg.content}
+                </div>
+              </div>
+            ))}
+            {loading && (
+              <div className={`px-2.5 py-1.5 rounded-lg inline-block border ${C.bgSoft} ${C.border}`}>
+                <Spinner />
+              </div>
+            )}
+            <div ref={bottomRef} />
+          </div>
+          <div className={`p-2 border-t ${C.border} shrink-0`}>
+            <div className="flex gap-1.5">
+              <input value={input} onChange={e => setInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && send()}
+                placeholder={run ? "Ask about this run..." : "Ask anything..."}
+                className={`flex-1 px-2.5 py-1.5 rounded text-xs focus:outline-none focus:ring-1 focus:ring-brand-500 border ${C.input}`} />
+              <button onClick={send} disabled={loading || !input.trim()}
+                className="px-3 py-1.5 bg-brand-600 text-white rounded text-xs font-medium hover:bg-brand-500 disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
+                Send
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- App ----
+    function App() {
+      const [selectedRun, setSelectedRun] = useState(null);
+      const [selectedTrace, setSelectedTrace] = useState(null);
+      const [entity, setEntity] = useState('autonomy');
+      const [project, setProject] = useState('slime-agent');
+      const [editingProject, setEditingProject] = useState(false);
+      const [entityInput, setEntityInput] = useState('autonomy');
+      const [projectInput, setProjectInput] = useState('slime-agent');
+      const [liveMode, setLiveMode] = useState(false);
+      const [runListKey, setRunListKey] = useState(0);
+      const [syncing, setSyncing] = useState(false);
+      const [syncInfo, setSyncInfo] = useState(null);
+      const [theme, setTheme] = useState(() => {
+        try { return localStorage.getItem('bw-theme') || 'dark'; } catch { return 'dark'; }
+      });
+
+      useEffect(() => {
+        document.documentElement.classList.toggle('dark', theme === 'dark');
+        try { localStorage.setItem('bw-theme', theme); } catch {}
+      }, [theme]);
+
+      useEffect(() => {
+        api.config().then(cfg => {
+          setEntity(cfg.entity); setProject(cfg.project);
+          setEntityInput(cfg.entity); setProjectInput(cfg.project);
+          setLiveMode(cfg.live_mode);
+          api.setProject(cfg.entity, cfg.project);
+        }).catch(() => {});
+        api.syncStatus().then(s => setSyncInfo(s)).catch(() => {});
+      }, []);
+
+      const handleSelectRun = (run) => { setSelectedRun(run); setSelectedTrace(null); };
+
+      const handleSync = async () => {
+        setSyncing(true);
+        try {
+          await fetch('/api/trigger_sync?limit=50&detail_top=15', { method: 'POST' });
+        } catch (e) {
+          console.error('Sync failed:', e);
+        }
+        try {
+          const s = await api.syncStatus();
+          setSyncInfo(s);
+        } catch (e) {}
+        setRunListKey(k => k + 1);  // triggers RunList refresh without remount
+        setSyncing(false);
+      };
+
+      const applyProject = () => {
+        const e = entityInput.trim(); const p = projectInput.trim();
+        if (e && p) {
+          setEntity(e); setProject(p); api.setProject(e, p);
+          setSelectedRun(null); setSelectedTrace(null);
+          setRunListKey(k => k + 1); setEditingProject(false);
+        }
+      };
+
+      return (
+        <ThemeContext.Provider value={theme}>
+          <div className="h-screen flex flex-col">
+            {/* Top bar */}
+            <header className={`h-12 flex items-center px-4 border-b shrink-0 ${C.border} ${C.bgPanel} backdrop-blur`}>
+              <div className="flex items-center gap-2">
+                <span className="text-brand-600 dark:text-brand-400 font-semibold text-lg">Better Weave</span>
+                <span className={`text-xs ${C.textFaint}`}>|</span>
+                {editingProject ? (
+                  <div className="flex items-center gap-1">
+                    <input value={entityInput} onChange={e => setEntityInput(e.target.value)}
+                      placeholder="entity"
+                      className={`w-24 px-1.5 py-0.5 text-xs rounded mono border focus:outline-none focus:ring-1 focus:ring-brand-500 ${C.input}`}
+                      onKeyDown={e => e.key === 'Enter' && applyProject()} />
+                    <span className={`text-xs ${C.textFaint}`}>/</span>
+                    <input value={projectInput} onChange={e => setProjectInput(e.target.value)}
+                      placeholder="project"
+                      className={`w-28 px-1.5 py-0.5 text-xs rounded mono border focus:outline-none focus:ring-1 focus:ring-brand-500 ${C.input}`}
+                      onKeyDown={e => e.key === 'Enter' && applyProject()} />
+                    <button onClick={applyProject} className="px-2 py-0.5 text-xs bg-brand-600 text-white rounded hover:bg-brand-500">Go</button>
+                    <button onClick={() => { setEditingProject(false); setEntityInput(entity); setProjectInput(project); }}
+                      className={`px-1.5 py-0.5 text-xs ${C.textMuted} hover:text-gray-700 dark:hover:text-gray-300`}>Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setEditingProject(true)}
+                    className={`text-xs mono transition-colors ${C.textSecondary} hover:text-gray-800 dark:hover:text-gray-200`}
+                    title="Click to change project">
+                    {entity}/{project}
+                  </button>
+                )}
+                {liveMode && <Badge color="green">live</Badge>}
+              </div>
+              <div className="ml-auto flex items-center gap-3">
+                {syncInfo && (
+                  <span className={`text-xs ${C.textFaint}`}>
+                    Synced: {syncInfo.synced_at?.slice(0, 16).replace('T',' ')} ({syncInfo.num_runs} runs)
+                  </span>
+                )}
+                <button
+                  onClick={handleSync}
+                  disabled={syncing}
+                  className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${
+                    syncing ? 'opacity-60 cursor-wait' : ''
+                  } bg-brand-500 hover:bg-brand-600 text-white`}>
+                  {syncing ? 'Syncing...' : 'Sync'}
+                </button>
+                <a href={`https://wandb.agi.amazon.dev/${entity}/${project}`}
+                   target="_blank" rel="noreferrer"
+                   className={`text-xs ${C.textMuted} hover:text-gray-700 dark:hover:text-gray-300`}>
+                  W&B Dashboard
+                </a>
+                <ThemeToggle theme={theme} setTheme={setTheme} />
+              </div>
+            </header>
+
+            {/* Main layout: 3-column */}
+            <div className="flex flex-1 overflow-hidden">
+              <div className={`w-72 border-r flex flex-col shrink-0 ${C.border} ${C.bg}`}>
+                <RunList onSelectRun={handleSelectRun} selectedRunId={selectedRun?.id} refreshTrigger={runListKey} />
+              </div>
+
+              <div className={`flex-1 overflow-hidden ${C.bg}`}>
+                {selectedRun ? (
+                  <ErrorBoundary key={selectedRun.id}>
+                    <RunDetail run={selectedRun} onSelectTrace={setSelectedTrace} />
+                  </ErrorBoundary>
+                ) : (
+                  <div className={`flex items-center justify-center h-full ${C.textFaint}`}>
+                    <div className="text-center">
+                      <p className="text-2xl mb-2">Select a run</p>
+                      <p className={`text-sm ${C.textMuted}`}>Choose a run from the sidebar to view metrics, trajectories, and more</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className={`w-80 border-l flex flex-col shrink-0 ${C.border} ${C.bg}`}>
+                <AskSidebar run={selectedRun} trace={selectedTrace} />
+              </div>
+            </div>
+          </div>
+        </ThemeContext.Provider>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
