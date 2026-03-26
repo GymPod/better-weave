@@ -62,14 +62,10 @@ def _project_data_dir(entity: str, project: str) -> Path:
 # ---------- W&B Live Fetch Functions ----------
 
 
-# On Modal, BETTER_WEAVE_DATA is set — W&B internal server is unreachable, skip live fetch
-_ON_MODAL = "BETTER_WEAVE_DATA" in os.environ
 _wandb_reachable_result: list = []  # [timestamp, bool]
 
 def _wandb_reachable() -> bool:
     """Quick check if W&B server is reachable. Caches result for 10 minutes."""
-    if _ON_MODAL:
-        return False
     import time
     now = time.time()
     if _wandb_reachable_result and now - _wandb_reachable_result[0] < 600:
@@ -407,19 +403,6 @@ def sync_status() -> dict[str, Any]:
     return meta
 
 
-@app.post("/api/reload_volume")
-def reload_volume() -> dict[str, Any]:
-    """Reload Modal volume to pick up newly synced data."""
-    try:
-        import modal
-        vol = modal.Volume.from_name("better-weave-data")
-        vol.reload()
-        meta = _read_json(DATA_DIR / "sync_meta.json")
-        return {"reloaded": True, "sync_meta": meta}
-    except Exception as e:
-        return {"reloaded": False, "error": str(e)}
-
-
 @app.post("/api/trigger_sync")
 def trigger_sync(
     limit: int = Query(default=50, le=200),
@@ -427,24 +410,12 @@ def trigger_sync(
     entity: str | None = None,
     project: str | None = None,
 ) -> dict[str, Any]:
-    """Trigger a manual sync. Live-fetches from W&B if reachable, otherwise reloads Modal volume."""
+    """Trigger a manual sync — live-fetches from W&B and caches locally."""
     from datetime import datetime, timezone
 
     ent = entity or DEFAULT_ENTITY
     proj = project or DEFAULT_PROJECT
 
-    # On Modal, just reload the volume
-    if _ON_MODAL:
-        try:
-            import modal
-            vol = modal.Volume.from_name("better-weave-data")
-            vol.reload()
-            meta = _read_json(DATA_DIR / "sync_meta.json")
-            return {"status": "reloaded_volume", "sync_meta": meta}
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
-
-    # Local mode: live-fetch from W&B
     if not _WANDB_AVAILABLE or not _wandb_reachable():
         return {"status": "error", "error": "W&B is not reachable"}
 
@@ -452,13 +423,11 @@ def trigger_sync(
     synced_runs = 0
     synced_details = 0
 
-    # Fetch runs list
     runs = _live_fetch_runs(ent, proj, limit, None, None)
     if runs:
         _write_json(data_dir / "runs.json", runs)
         synced_runs = len(runs)
 
-        # Fetch details for top N runs
         for run in runs[:detail_top]:
             rid = run["id"]
             try:

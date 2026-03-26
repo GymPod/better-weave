@@ -84,14 +84,7 @@
     // ---- API ----
     let _apiEntity = 'autonomy';
     let _apiProject = 'slime-agent';
-
-    // Hosting provider: "standalone" (local/Modal) or "circuit" (Vercel/Circuit)
-    // Set via <meta name="bw-provider"> or defaults to "standalone"
-    const _provider = (() => {
-      const meta = document.querySelector('meta[name="bw-provider"]');
-      return meta ? meta.getAttribute('content') : 'standalone';
-    })();
-    const _apiBase = _provider === 'circuit' ? '/api/better-weave' : '/api';
+    const _apiBase = '/api';
 
     const api = {
       setProject(entity, project) { _apiEntity = entity; _apiProject = project; },

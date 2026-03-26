@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync W&B data to Modal volume for Better Weave.
+"""Sync W&B data locally for Better Weave.
 
 Run locally (needs access to wandb.agi.amazon.dev):
     python sync.py                    # sync latest 30 runs
@@ -14,12 +14,10 @@ import json
 import logging
 import os
 import re
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import modal
 import requests
 import wandb
 
@@ -150,50 +148,30 @@ def fetch_run_history(run_id: str, samples: int = 500) -> dict[str, Any]:
 
 
 def fetch_run_traces(run_id: str, max_versions: int = 10) -> dict[str, Any]:
-    """Fetch trajectory data from W&B Table artifacts (TrajectoryDetails).
-
-    Each training step logs a TrajectoryDetails artifact with ~32 rollout rows.
-    We fetch the latest N versions and combine them.
-
-    Args:
-        run_id: W&B run ID
-        max_versions: Max artifact versions to fetch (latest N)
-    """
+    """Fetch trajectory data from W&B Table artifacts (TrajectoryDetails)."""
     api = wandb.Api()
     run = api.run(f"{ENTITY}/{PROJECT}/{run_id}")
 
-    # Find trajectory artifacts
     all_arts = list(run.logged_artifacts())
     traj_arts = [a for a in all_arts if "TrajectoryDetails" in a.name]
     if not traj_arts:
         logger.info(f"  No TrajectoryDetails artifacts for {run_id}")
         return {"traces": [], "count": 0, "source": "no_artifacts"}
 
-    # Sort by version number, take latest N
     traj_arts.sort(key=lambda a: a.version)
     selected = traj_arts[-max_versions:]
     logger.info(f"  Found {len(traj_arts)} trajectory artifacts, fetching latest {len(selected)}")
-
-    # Table columns from gta_trajectory_table.py
-    TABLE_COLUMNS = [
-        "called", "step", "dataset_name", "verifier_type", "status", "remove_sample",
-        "prompt", "label", "trajectory", "reward", "env_reward", "failure_reason",
-        "error", "num_steps", "num_tool_calls", "response_length", "verifier_outcome",
-        "grader_responses", "duration", "time_env_create", "time_load_tools",
-        "time_agent_invoke", "time_verify", "time_cleanup",
-    ]
 
     traces: list[dict] = []
     for art in selected:
         try:
             dl_path = art.download(f"/tmp/better_weave_artifacts/{run_id}/{art.version}")
-            # Find the table json file
             table_files = list(Path(dl_path).glob("*.table.json"))
             if not table_files:
                 continue
             with open(table_files[0]) as f:
                 table = json.load(f)
-            columns = table.get("columns", TABLE_COLUMNS)
+            columns = table.get("columns", [])
             for row in table.get("data", []):
                 row_dict = dict(zip(columns, row))
                 traces.append({
@@ -228,53 +206,13 @@ def fetch_run_traces(run_id: str, max_versions: int = 10) -> dict[str, Any]:
     return {"traces": traces, "count": len(traces), "source": "artifacts"}
 
 
-def sync_to_volume(data_dir: Path) -> None:
-    """Upload local data_dir to Modal volume."""
-    vol = modal.Volume.from_name("better-weave-data", create_if_missing=True)
-    logger.info("Uploading to Modal volume...")
-
-    files = sorted(data_dir.rglob("*.json"))
-    with vol.batch_upload(force=True) as batch:
-        for fpath in files:
-            rel = fpath.relative_to(data_dir)
-            remote_path = f"/better_weave/{rel}"
-            batch.put_file(fpath, remote_path)
-            logger.info(f"  queued {rel}")
-
-    logger.info(f"Uploaded {len(files)} files to volume.")
-
-
-S3_BUCKET = os.environ.get("BETTER_WEAVE_S3_BUCKET", "agi-emerge-data-us-east-1")
-S3_PREFIX = os.environ.get("BETTER_WEAVE_S3_PREFIX", "better_weave")
-
-
-def sync_to_s3(data_dir: Path) -> None:
-    """Upload local data_dir to S3 (for Vercel/Circuit deployment)."""
-    import boto3
-
-    s3 = boto3.client("s3")
-    files = sorted(data_dir.rglob("*.json"))
-    logger.info(f"Uploading {len(files)} files to s3://{S3_BUCKET}/{S3_PREFIX}/...")
-
-    for fpath in files:
-        rel = fpath.relative_to(data_dir)
-        key = f"{S3_PREFIX}/{rel}"
-        s3.upload_file(str(fpath), S3_BUCKET, key, ExtraArgs={"ContentType": "application/json"})
-        logger.info(f"  uploaded {rel}")
-
-    logger.info(f"Uploaded {len(files)} files to S3.")
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sync W&B data to Modal volume")
+    parser = argparse.ArgumentParser(description="Sync W&B data locally for Better Weave")
     parser.add_argument("--limit", type=int, default=30, help="Number of runs to fetch")
     parser.add_argument("--run-id", type=str, help="Sync a specific run's detail+history")
     parser.add_argument("--detail-top", type=int, default=10, help="Fetch detail for top N runs")
-    parser.add_argument("--local-only", action="store_true", help="Save locally, don't upload anywhere")
-    parser.add_argument("--s3", action="store_true", help="Upload to S3 (for Vercel/Circuit deployment)")
-    parser.add_argument("--modal", action="store_true", help="Upload to Modal volume (default if neither --s3 nor --local-only)")
-    parser.add_argument("--entity", type=str, default=None, help="W&B entity (default: from env or 'autonomy')")
-    parser.add_argument("--project", type=str, default=None, help="W&B project (default: from env or 'slime-agent')")
+    parser.add_argument("--entity", type=str, default=None, help="W&B entity")
+    parser.add_argument("--project", type=str, default=None, help="W&B project")
     args = parser.parse_args()
 
     global ENTITY, PROJECT
@@ -288,7 +226,6 @@ def main() -> None:
     runs_dir.mkdir(parents=True, exist_ok=True)
 
     if args.run_id:
-        # Sync single run
         logger.info(f"Fetching detail for {args.run_id}...")
         detail = fetch_run_detail(args.run_id)
         (runs_dir / f"{args.run_id}.json").write_text(json.dumps(detail, default=str))
@@ -299,7 +236,6 @@ def main() -> None:
         traces = fetch_run_traces(args.run_id)
         (runs_dir / f"{args.run_id}_traces.json").write_text(json.dumps(traces, default=str))
     else:
-        # Sync run list + top N details
         logger.info(f"Fetching {args.limit} runs...")
         runs = fetch_runs(limit=args.limit)
         (tmp_dir / "runs.json").write_text(json.dumps(runs, default=str))
@@ -329,7 +265,6 @@ def main() -> None:
             except Exception as e:
                 logger.warning(f"  Failed to fetch traces: {e}")
 
-    # Write sync metadata
     meta = {
         "synced": True,
         "synced_at": datetime.now(timezone.utc).isoformat(),
@@ -337,16 +272,7 @@ def main() -> None:
         "message": "Data synced successfully",
     }
     (tmp_dir / "sync_meta.json").write_text(json.dumps(meta))
-
-    if args.local_only:
-        logger.info(f"Data saved to {tmp_dir}")
-    elif args.s3:
-        sync_to_s3(tmp_dir)
-        logger.info("Done! Data available on S3.")
-    else:
-        # Default: upload to Modal (use --modal explicitly or as default)
-        sync_to_volume(tmp_dir)
-        logger.info("Done! Data available on Modal volume.")
+    logger.info(f"Data saved to {tmp_dir}")
 
 
 if __name__ == "__main__":
