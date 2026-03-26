@@ -574,7 +574,7 @@
 
       // Build ordered step list from loaded data
       const loadedSteps = [...new Set(Object.values(versionToStep))].sort((a, b) => a - b);
-      // Unloaded versions — we don't know their step yet
+      // Unloaded versions — estimate step from loaded version-step mapping
       const unloadedVersions = allVersions.filter(v => !loadedVersions.has(v.version));
 
       // When step filter changes, auto-load the version if needed
@@ -585,6 +585,15 @@
           onLoadVersion(val.slice(3));
         }
       };
+
+      // Auto-switch from version filter to step filter once loaded
+      useEffect(() => {
+        if (stepFilter.startsWith('_v:')) {
+          const ver = stepFilter.slice(3);
+          const step = versionToStep[ver];
+          if (step != null) setStepFilter(String(step));
+        }
+      }, [stepFilter, versionToStep]);
 
       let filteredTraces = allTraces?.traces || [];
       if (stepFilter !== 'all') {
@@ -624,40 +633,30 @@
 
       return (
         <div className="space-y-3 fade-in">
-          {/* Step selector — steps are primary, versions are hidden */}
+          {/* Step dropdown + reward filter */}
           {(allVersions.length > 0 || hasTraces) && (
             <div className="flex items-center gap-2 flex-wrap">
-              {/* Step buttons — loaded steps as pill buttons */}
-              <div className="flex gap-1 flex-wrap items-center">
-                <button onClick={() => handleStepSelect('all')}
-                  className={`px-2.5 py-1 text-xs rounded-full transition-colors ${stepFilter === 'all' ? C.btnActive : C.btn}`}>
-                  All ({totalCount})
-                </button>
+              <select value={stepFilter} onChange={e => handleStepSelect(e.target.value)}
+                className={`px-2 py-1.5 text-xs rounded-lg border focus:outline-none focus:ring-1 focus:ring-brand-500 ${C.input}`}>
+                <option value="all">All steps ({totalCount} traces)</option>
                 {loadedSteps.map(s => {
                   const count = (allTraces?.traces || []).filter(t => t.step === s).length;
                   const ok = (allTraces?.traces || []).filter(t => t.step === s && t.reward > 0).length;
-                  return (
-                    <button key={s} onClick={() => handleStepSelect(String(s))}
-                      className={`px-2.5 py-1 text-xs rounded-full transition-colors ${stepFilter === String(s) ? C.btnActive : C.btn}`}>
-                      Step {s} <span className={`${C.textFaint}`}>({ok}/{count})</span>
-                    </button>
-                  );
+                  return <option key={s} value={String(s)}>Step {s}  ({ok}/{count} pass)</option>;
                 })}
-                {/* Unloaded steps — click to load */}
-                {unloadedVersions.map(v => {
-                  const isLoading = loadingVersion === v.version;
-                  return (
-                    <button key={v.version}
-                      onClick={() => handleStepSelect(`_v:${v.version}`)}
-                      className={`px-2.5 py-1 text-xs rounded-full border border-dashed transition-colors ${
-                        isLoading ? 'border-yellow-400 text-yellow-600 dark:text-yellow-400 animate-pulse'
-                        : `${C.border} ${C.textMuted} hover:border-brand-400 hover:text-brand-500`
-                      }`}>
-                      {isLoading ? <React.Fragment><Spinner /> Loading...</React.Fragment> : v.version}
-                    </button>
-                  );
-                })}
-              </div>
+                {unloadedVersions.length > 0 && <option disabled>── Not loaded ──</option>}
+                {unloadedVersions.map(v => (
+                  <option key={v.version} value={`_v:${v.version}`}>
+                    {loadingVersion === v.version ? 'Loading...' : `Load ${v.version}...`}
+                  </option>
+                ))}
+              </select>
+
+              {loadingVersion && (
+                <span className="flex items-center gap-1 text-xs text-yellow-600 dark:text-yellow-400">
+                  <Spinner /> Loading...
+                </span>
+              )}
 
               {/* Reward filter */}
               <div className="flex gap-1 ml-auto">
