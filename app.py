@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Better Weave")
 
-DATA_DIR = Path(os.environ.get("BETTER_WEAVE_DATA", "/data/better_weave"))
+DATA_DIR = Path(os.environ.get("BETTER_WEAVE_DATA", "/tmp/better_weave_sync"))
 WANDB_BASE_URL = os.environ.get("WANDB_BASE_URL", "https://wandb.agi.amazon.dev")
 DEFAULT_ENTITY = os.environ.get("BETTER_WEAVE_ENTITY", "autonomy")
 DEFAULT_PROJECT = os.environ.get("BETTER_WEAVE_PROJECT", "slime-agent")
@@ -368,29 +368,72 @@ def get_run_history(
     raise HTTPException(status_code=404, detail=f"History for {run_id} not available.")
 
 
+_traces_loading: dict[str, float] = {}  # run_id -> start timestamp
+
+
+def _bg_fetch_traces(ent: str, proj: str, run_id: str) -> None:
+    """Background thread to fetch traces from W&B artifacts."""
+    try:
+        logger.info(f"Background: fetching traces for {run_id}")
+        data = _live_fetch_traces(ent, proj, run_id)
+        if data:
+            data_dir = _project_data_dir(ent, proj)
+            _write_json(data_dir / "runs" / f"{run_id}_traces.json", data)
+            logger.info(f"Background: cached {data.get('count', 0)} traces for {run_id}")
+        else:
+            # Write empty result so we don't keep retrying
+            data_dir = _project_data_dir(ent, proj)
+            _write_json(data_dir / "runs" / f"{run_id}_traces.json",
+                        {"traces": [], "count": 0, "source": "no_artifacts"})
+            logger.info(f"Background: no traces found for {run_id}")
+    except Exception as e:
+        logger.warning(f"Background trace fetch failed for {run_id}: {e}")
+        # Write error result
+        try:
+            data_dir = _project_data_dir(ent, proj)
+            _write_json(data_dir / "runs" / f"{run_id}_traces.json",
+                        {"traces": [], "count": 0, "source": "error"})
+        except Exception:
+            pass
+    finally:
+        _traces_loading.pop(run_id, None)
+
+
 @app.get("/api/runs/{run_id}/traces")
 def get_run_traces(
     run_id: str,
     entity: str | None = None,
     project: str | None = None,
+    refresh: bool = False,
 ) -> dict[str, Any]:
-    """Get traces. Tries cache first, then live fetch from artifacts."""
+    """Get traces. Returns cache immediately, fetches live in background if missing."""
+    import threading
+
     ent = entity or DEFAULT_ENTITY
     proj = project or DEFAULT_PROJECT
     data_dir = _project_data_dir(ent, proj)
 
-    # Try cache
+    # Try cache first
     data = _read_json(data_dir / "runs" / f"{run_id}_traces.json")
-    if data and data.get("count", 0) > 0:
+    if data and data.get("count", 0) > 0 and not refresh:
         return data
 
-    # Try live fetch
-    data = _live_fetch_traces(ent, proj, run_id)
-    if data:
-        _write_json(data_dir / "runs" / f"{run_id}_traces.json", data)
-        return data
+    # If already fetching in background, tell frontend to poll (with 120s timeout)
+    import time as _time
+    if run_id in _traces_loading:
+        if _time.time() - _traces_loading[run_id] < 120:
+            return {"traces": [], "count": 0, "source": "loading"}
+        else:
+            _traces_loading.pop(run_id, None)  # stale, retry
 
-    return {"traces": [], "count": 0, "source": "not_synced"}
+    # Start background fetch
+    if _WANDB_AVAILABLE and _wandb_reachable():
+        _traces_loading[run_id] = _time.time()
+        t = threading.Thread(target=_bg_fetch_traces, args=(ent, proj, run_id), daemon=True)
+        t.start()
+        return {"traces": [], "count": 0, "source": "loading"}
+
+    return {"traces": [], "count": 0, "source": "not_available"}
 
 
 @app.get("/api/sync_status")

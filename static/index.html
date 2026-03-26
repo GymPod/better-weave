@@ -199,6 +199,11 @@
           if (s) params.search = s;
           const data = await api.runs(params);
           setRuns(data);
+          // If we have a selectedRunId from hash but only a stub, upgrade it
+          if (selectedRunId && onSelectRun) {
+            const full = data.find(r => r.id === selectedRunId);
+            if (full && full.display_name) onSelectRun(full, true);
+          }
         } catch (e) {
           console.error('Failed to fetch runs:', e);
         }
@@ -281,8 +286,9 @@
     }
 
     // ---- Run Detail Panel ----
-    function RunDetail({ run, onSelectTrace }) {
-      const [tab, setTab] = useState('metrics');
+    function RunDetail({ run, onSelectTrace, restoredTraceIdx }) {
+      const hasRestoredTrace = restoredTraceIdx != null;
+      const [tab, setTab] = useState(hasRestoredTrace ? 'traces' : 'metrics');
       const [detail, setDetail] = useState(null);
       const [history, setHistory] = useState(null);
       const [traces, setTraces] = useState(null);
@@ -290,7 +296,7 @@
 
       useEffect(() => {
         setLoading(true);
-        setTab('metrics');
+        if (!hasRestoredTrace) setTab('metrics');
         setDetail(null);
         setHistory(null);
         setTraces(null);
@@ -301,14 +307,38 @@
       }, [run.id]);
 
       const loadTraces = useCallback(() => {
-        if (traces && traces.source !== 'loading') return;
-        setTraces({ traces: [], count: 0, source: 'loading' });
-        api.traces(run.id).then(setTraces).catch(e => {
+        if (traces && traces.source !== 'loading' && traces.count > 0) return;
+        if (!traces || traces.source !== 'loading') {
+          setTraces({ traces: [], count: 0, source: 'loading' });
+        }
+        api.traces(run.id).then(data => {
+          if (data.source === 'loading') {
+            // Backend is fetching in background, poll every 2s
+            setTimeout(() => setTraces(prev => prev?.source === 'loading' ? { ...prev, _poll: Date.now() } : prev), 2000);
+          } else {
+            setTraces(data);
+          }
+        }).catch(e => {
           setTraces({ traces: [], count: 0, source: 'error', error: e.message });
         });
       }, [run.id, traces]);
 
-      useEffect(() => { if (tab === 'traces') loadTraces(); }, [tab, loadTraces]);
+      // Poll while loading
+      useEffect(() => {
+        if (tab === 'traces' && traces?.source === 'loading') {
+          const timer = setInterval(() => {
+            api.traces(run.id).then(data => {
+              if (data.source !== 'loading') {
+                setTraces(data);
+                clearInterval(timer);
+              }
+            }).catch(() => {});
+          }, 2000);
+          return () => clearInterval(timer);
+        }
+      }, [tab, run.id, traces?.source]);
+
+      useEffect(() => { if (tab === 'traces') loadTraces(); }, [tab, run.id]);
 
       if (loading) return <div className="flex items-center justify-center h-full"><Spinner /></div>;
 
@@ -362,7 +392,7 @@
           <div className="flex-1 overflow-y-auto scrollbar-thin p-4">
             {tab === 'metrics' && <MetricsTab history={history} metricGroups={metricGroups} />}
             {tab === 'config' && <ConfigTab detail={detail} />}
-            {tab === 'traces' && (traces?.source === 'loading' ? <div className="flex items-center gap-2"><Spinner /> <span className={C.textSecondary}>Loading traces...</span></div> : <TracesTab traces={traces} run={run} onSelectTrace={onSelectTrace} />)}
+            {tab === 'traces' && (traces?.source === 'loading' ? <div className="flex items-center gap-2 p-4"><Spinner /> <span className={C.textSecondary}>Fetching trajectories from W&B artifacts...</span></div> : <TracesTab traces={traces} run={run} onSelectTrace={onSelectTrace} restoredTraceIdx={restoredTraceIdx} />)}
           </div>
         </div>
       );
@@ -468,7 +498,7 @@
     }
 
     // ---- Traces Tab ----
-    function TracesTab({ traces, run, onSelectTrace }) {
+    function TracesTab({ traces, run, onSelectTrace, restoredTraceIdx }) {
       const [selected, _setSelected] = useState(null);
       const [pastedData, setPastedData] = useState(null);
       const [pasteMode, setPasteMode] = useState(false);
@@ -476,11 +506,23 @@
       const [pasteError, setPasteError] = useState('');
       const [stepFilter, setStepFilter] = useState('all');
       const [rewardFilter, setRewardFilter] = useState('all');
+      const restoredRef = useRef(false);
 
-      const setSelected = (trace) => {
+      const setSelected = (trace, idx) => {
         _setSelected(trace);
         if (onSelectTrace) onSelectTrace(trace);
+        writeHash({ trace: trace ? (idx != null ? String(idx) : '') : '' });
       };
+
+      // Restore selected trace from URL hash after traces load
+      useEffect(() => {
+        if (!restoredRef.current && restoredTraceIdx != null && traces?.traces?.length > restoredTraceIdx) {
+          restoredRef.current = true;
+          const t = traces.traces[restoredTraceIdx];
+          _setSelected(t);
+          if (onSelectTrace) onSelectTrace(t);
+        }
+      }, [traces?.traces?.length, restoredTraceIdx]);
 
       const handlePaste = () => {
         setPasteError('');
@@ -518,7 +560,7 @@
       const totalCount = allTraces?.traces?.length || 0;
 
       if (selected) {
-        return <TraceDetail trace={selected} onBack={() => setSelected(null)} />;
+        return <TraceDetail trace={selected} onBack={() => setSelected(null, null)} />;
       }
 
       return (
@@ -567,7 +609,9 @@
 
           {!hasTraces && !pasteMode && (
             <div className={`p-4 text-center text-sm ${C.textMuted}`}>
-              No trajectory artifacts found for this run. Run <code className={`mono ${C.textSecondary}`}>python sync.py --run-id {run?.id}</code> to sync.
+              {allTraces?.source === 'not_available'
+                ? 'W&B is not reachable. Cannot fetch trajectory artifacts.'
+                : 'No trajectory artifacts found for this run.'}
             </div>
           )}
 
@@ -586,9 +630,11 @@
 
           {filteredTraces.length > 0 && (
             <div className="space-y-1">
-              {filteredTraces.map((t, i) => (
+              {filteredTraces.map((t, i) => {
+                const globalIdx = (allTraces?.traces || []).indexOf(t);
+                return (
                 <button key={t.id || i}
-                  onClick={() => setSelected(t)}
+                  onClick={() => setSelected(t, globalIdx)}
                   className={`w-full text-left p-2.5 rounded-lg border transition-colors ${C.border} ${C.hoverBg}`}>
                   <div className="flex items-center gap-2">
                     <Badge color={t.reward > 0 ? 'green' : t.reward === 0 ? 'red' : 'gray'}>
@@ -605,7 +651,8 @@
                   </div>
                   <p className={`text-xs mt-1 truncate mono ${C.textSecondary}`}>{t.prompt}</p>
                 </button>
-              ))}
+              );
+              })}
             </div>
           )}
         </div>
@@ -1195,10 +1242,29 @@
       );
     }
 
+    // ---- URL Hash State ----
+    function readHash() {
+      try {
+        const h = window.location.hash.slice(1);
+        if (!h) return {};
+        return Object.fromEntries(new URLSearchParams(h));
+      } catch { return {}; }
+    }
+    function writeHash(params) {
+      const cur = readHash();
+      const merged = { ...cur, ...params };
+      // Remove null/undefined keys
+      Object.keys(merged).forEach(k => { if (merged[k] == null || merged[k] === '') delete merged[k]; });
+      const s = new URLSearchParams(merged).toString();
+      window.history.replaceState(null, '', s ? `#${s}` : window.location.pathname);
+    }
+
     // ---- App ----
     function App() {
-      const [selectedRun, setSelectedRun] = useState(null);
+      const initHash = readHash();
+      const [selectedRun, setSelectedRun] = useState(initHash.run ? { id: initHash.run } : null);
       const [selectedTrace, setSelectedTrace] = useState(null);
+      const [restoredTraceIdx, setRestoredTraceIdx] = useState(initHash.trace != null ? Number(initHash.trace) : null);
       const [entity, setEntity] = useState('autonomy');
       const [project, setProject] = useState('slime-agent');
       const [editingProject, setEditingProject] = useState(false);
@@ -1227,7 +1293,17 @@
         api.syncStatus().then(s => setSyncInfo(s)).catch(() => {});
       }, []);
 
-      const handleSelectRun = (run) => { setSelectedRun(run); setSelectedTrace(null); };
+      const handleSelectRun = (run, fromRestore) => {
+        setSelectedRun(run);
+        if (!fromRestore) {
+          setSelectedTrace(null); setRestoredTraceIdx(null);
+          writeHash({ run: run?.id || '', trace: '' });
+        }
+      };
+      const handleSelectTrace = (trace) => {
+        setSelectedTrace(trace);
+        // Don't write trace index to hash here - TracesTab will handle it
+      };
 
       const handleSync = async () => {
         setSyncing(true);
@@ -1317,7 +1393,7 @@
               <div className={`flex-1 overflow-hidden ${C.bg}`}>
                 {selectedRun ? (
                   <ErrorBoundary key={selectedRun.id}>
-                    <RunDetail run={selectedRun} onSelectTrace={setSelectedTrace} />
+                    <RunDetail run={selectedRun} onSelectTrace={handleSelectTrace} restoredTraceIdx={restoredTraceIdx} />
                   </ErrorBoundary>
                 ) : (
                   <div className={`flex items-center justify-center h-full ${C.textFaint}`}>
