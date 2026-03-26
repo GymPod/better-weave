@@ -234,7 +234,7 @@ def _parse_trace_artifact(art, entity: str, project: str, run_id: str) -> list[d
     return traces
 
 
-def _fetch_trace_versions(entity: str, project: str, run_id: str, versions: list[int]) -> dict[str, Any]:
+def _fetch_trace_versions(entity: str, project: str, run_id: str, versions: list[str]) -> dict[str, Any]:
     """Fetch specific trajectory artifact versions."""
     api = _wandb.Api()
     run = api.run(f"{entity}/{project}/{run_id}")
@@ -366,9 +366,9 @@ def _bg_list_versions(ent: str, proj: str, run_id: str) -> None:
         _traces_loading.pop(key, None)
 
 
-def _bg_fetch_version(ent: str, proj: str, run_id: str, version: int) -> None:
+def _bg_fetch_version(ent: str, proj: str, run_id: str, version: str) -> None:
     """Background: fetch a single version and merge into cached traces."""
-    key = f"{run_id}:v{version}"
+    key = f"{run_id}:{version}"
     try:
         data = _fetch_trace_versions(ent, proj, run_id, [version])
         # Merge into existing cache
@@ -396,15 +396,15 @@ def get_run_traces(
     run_id: str,
     entity: str | None = None,
     project: str | None = None,
-    version: int | None = None,
+    version: str | None = None,
 ) -> dict[str, Any]:
-    """Get traces. First call lists versions + loads first/last. Use ?version=N to load more."""
+    """Get traces. First call lists versions + loads first/last. Use ?version=v1 to load more."""
     ent = entity or DEFAULT_ENTITY
     proj = project or DEFAULT_PROJECT
 
     # Request to load a specific version
     if version is not None:
-        vkey = f"{run_id}:v{version}"
+        vkey = f"{run_id}:{version}"
         cached = _read_cache(ent, proj, f"{run_id}_traces.json")
         if cached and version in cached.get("loaded_versions", []):
             return cached  # already loaded

@@ -611,8 +611,8 @@
                         : isLoading ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 border border-yellow-300 dark:border-yellow-700/40 animate-pulse'
                         : `${C.btn} border ${C.border} cursor-pointer hover:bg-brand-100 dark:hover:bg-brand-900/30`
                       }`}
-                      title={loaded ? `v${v.version} loaded` : isLoading ? 'Loading...' : `Click to load v${v.version}`}>
-                      v{v.version}
+                      title={loaded ? `${v.version} loaded` : isLoading ? 'Loading...' : `Click to load ${v.version}`}>
+                      {v.version}
                     </button>
                   );
                 })}
