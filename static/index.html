@@ -646,11 +646,14 @@
                   return <option key={s} value={String(s)}>Step {s}  ({ok}/{count} pass)</option>;
                 })}
                 {unloadedVersions.length > 0 && <option disabled>── Not loaded ──</option>}
-                {unloadedVersions.map(v => (
-                  <option key={v.version} value={`_v:${v.version}`}>
-                    {loadingVersion === v.version ? 'Loading...' : `Load ${v.version}...`}
-                  </option>
-                ))}
+                {unloadedVersions.map((v, i) => {
+                  const idx = allVersions.indexOf(v);
+                  return (
+                    <option key={v.version} value={`_v:${v.version}`}>
+                      {loadingVersion === v.version ? 'Loading...' : `Step #${idx + 1} (click to load)`}
+                    </option>
+                  );
+                })}
               </select>
 
               {loadingVersion && (
