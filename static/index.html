@@ -85,18 +85,26 @@
     let _apiEntity = 'autonomy';
     let _apiProject = 'slime-agent';
 
+    // Auto-detect base path (e.g. "/better-weave" when served via Circuit rewrite)
+    const _basePath = (() => {
+      const path = window.location.pathname;
+      // If served under a subpath like /better-weave, strip trailing slash
+      const match = path.match(/^(\/better-weave)/);
+      return match ? match[1] : '';
+    })();
+
     const api = {
       setProject(entity, project) { _apiEntity = entity; _apiProject = project; },
       _ep(params = {}) {
         return new URLSearchParams({ entity: _apiEntity, project: _apiProject, ...params });
       },
       async get(url) {
-        const r = await fetch(url);
+        const r = await fetch(_basePath + url);
         if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
         return r.json();
       },
       async post(url, body) {
-        const r = await fetch(url, {
+        const r = await fetch(_basePath + url, {
           method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
         });
         if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
@@ -1231,7 +1239,7 @@
       const handleSync = async () => {
         setSyncing(true);
         try {
-          await fetch('/api/trigger_sync?limit=50&detail_top=15', { method: 'POST' });
+          await fetch(_basePath + '/api/trigger_sync?limit=50&detail_top=15', { method: 'POST' });
         } catch (e) {
           console.error('Sync failed:', e);
         }
