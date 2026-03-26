@@ -1265,11 +1265,13 @@
       const [selectedRun, setSelectedRun] = useState(initHash.run ? { id: initHash.run } : null);
       const [selectedTrace, setSelectedTrace] = useState(null);
       const [restoredTraceIdx, setRestoredTraceIdx] = useState(initHash.trace != null ? Number(initHash.trace) : null);
-      const [entity, setEntity] = useState('autonomy');
-      const [project, setProject] = useState('slime-agent');
+      const initEntity = initHash.entity || localStorage.getItem('bw-entity') || 'autonomy';
+      const initProject = initHash.project || localStorage.getItem('bw-project') || 'slime-agent';
+      const [entity, setEntity] = useState(initEntity);
+      const [project, setProject] = useState(initProject);
       const [editingProject, setEditingProject] = useState(false);
-      const [entityInput, setEntityInput] = useState('autonomy');
-      const [projectInput, setProjectInput] = useState('slime-agent');
+      const [entityInput, setEntityInput] = useState(initEntity);
+      const [projectInput, setProjectInput] = useState(initProject);
       const [liveMode, setLiveMode] = useState(false);
       const [runListKey, setRunListKey] = useState(0);
       const [syncing, setSyncing] = useState(false);
@@ -1284,11 +1286,16 @@
       }, [theme]);
 
       useEffect(() => {
+        // Set API project from initial state (hash/localStorage take priority)
+        api.setProject(initEntity, initProject);
         api.config().then(cfg => {
-          setEntity(cfg.entity); setProject(cfg.project);
-          setEntityInput(cfg.entity); setProjectInput(cfg.project);
           setLiveMode(cfg.live_mode);
-          api.setProject(cfg.entity, cfg.project);
+          // Only use server defaults if no hash/localStorage override
+          if (!initHash.entity && !localStorage.getItem('bw-entity')) {
+            setEntity(cfg.entity); setEntityInput(cfg.entity);
+            setProject(cfg.project); setProjectInput(cfg.project);
+            api.setProject(cfg.entity, cfg.project);
+          }
         }).catch(() => {});
         api.syncStatus().then(s => setSyncInfo(s)).catch(() => {});
       }, []);
@@ -1297,7 +1304,7 @@
         setSelectedRun(run);
         if (!fromRestore) {
           setSelectedTrace(null); setRestoredTraceIdx(null);
-          writeHash({ run: run?.id || '', trace: '' });
+          writeHash({ entity, project, run: run?.id || '', trace: '' });
         }
       };
       const handleSelectTrace = (trace) => {
@@ -1324,8 +1331,10 @@
         const e = entityInput.trim(); const p = projectInput.trim();
         if (e && p) {
           setEntity(e); setProject(p); api.setProject(e, p);
-          setSelectedRun(null); setSelectedTrace(null);
+          setSelectedRun(null); setSelectedTrace(null); setRestoredTraceIdx(null);
           setRunListKey(k => k + 1); setEditingProject(false);
+          try { localStorage.setItem('bw-entity', e); localStorage.setItem('bw-project', p); } catch {}
+          writeHash({ entity: e, project: p, run: '', trace: '' });
         }
       };
 
