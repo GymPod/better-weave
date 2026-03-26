@@ -244,12 +244,35 @@ def sync_to_volume(data_dir: Path) -> None:
     logger.info(f"Uploaded {len(files)} files to volume.")
 
 
+S3_BUCKET = os.environ.get("BETTER_WEAVE_S3_BUCKET", "agi-emerge-data-us-east-1")
+S3_PREFIX = os.environ.get("BETTER_WEAVE_S3_PREFIX", "better_weave")
+
+
+def sync_to_s3(data_dir: Path) -> None:
+    """Upload local data_dir to S3 (for Vercel/Circuit deployment)."""
+    import boto3
+
+    s3 = boto3.client("s3")
+    files = sorted(data_dir.rglob("*.json"))
+    logger.info(f"Uploading {len(files)} files to s3://{S3_BUCKET}/{S3_PREFIX}/...")
+
+    for fpath in files:
+        rel = fpath.relative_to(data_dir)
+        key = f"{S3_PREFIX}/{rel}"
+        s3.upload_file(str(fpath), S3_BUCKET, key, ExtraArgs={"ContentType": "application/json"})
+        logger.info(f"  uploaded {rel}")
+
+    logger.info(f"Uploaded {len(files)} files to S3.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync W&B data to Modal volume")
     parser.add_argument("--limit", type=int, default=30, help="Number of runs to fetch")
     parser.add_argument("--run-id", type=str, help="Sync a specific run's detail+history")
     parser.add_argument("--detail-top", type=int, default=10, help="Fetch detail for top N runs")
-    parser.add_argument("--local-only", action="store_true", help="Save locally, don't upload to Modal")
+    parser.add_argument("--local-only", action="store_true", help="Save locally, don't upload anywhere")
+    parser.add_argument("--s3", action="store_true", help="Upload to S3 (for Vercel/Circuit deployment)")
+    parser.add_argument("--modal", action="store_true", help="Upload to Modal volume (default if neither --s3 nor --local-only)")
     parser.add_argument("--entity", type=str, default=None, help="W&B entity (default: from env or 'autonomy')")
     parser.add_argument("--project", type=str, default=None, help="W&B project (default: from env or 'slime-agent')")
     args = parser.parse_args()
@@ -317,7 +340,11 @@ def main() -> None:
 
     if args.local_only:
         logger.info(f"Data saved to {tmp_dir}")
+    elif args.s3:
+        sync_to_s3(tmp_dir)
+        logger.info("Done! Data available on S3.")
     else:
+        # Default: upload to Modal (use --modal explicitly or as default)
         sync_to_volume(tmp_dir)
         logger.info("Done! Data available on Modal volume.")
 
