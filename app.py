@@ -184,56 +184,73 @@ def _fetch_history(entity: str, project: str, run_id: str, samples: int = 500) -
     return {"rows": rows, "keys": sorted(all_keys), "count": len(rows)}
 
 
-def _fetch_traces(entity: str, project: str, run_id: str, max_versions: int = 10) -> dict[str, Any]:
+def _list_trace_versions(entity: str, project: str, run_id: str) -> list[dict[str, Any]]:
+    """List available trajectory artifact versions (fast — no download)."""
     api = _wandb.Api()
     run = api.run(f"{entity}/{project}/{run_id}")
     all_arts = list(run.logged_artifacts())
     traj_arts = [a for a in all_arts if "TrajectoryDetails" in a.name]
-    if not traj_arts:
-        return {"traces": [], "count": 0, "source": "no_artifacts"}
-
     traj_arts.sort(key=lambda a: a.version)
-    selected = traj_arts[-max_versions:]
-    logger.info(f"Fetching {len(selected)}/{len(traj_arts)} trajectory artifacts for {run_id}")
+    return [{"version": a.version, "name": a.name} for a in traj_arts]
+
+
+def _parse_trace_artifact(art, entity: str, project: str, run_id: str) -> list[dict]:
+    """Download and parse a single trajectory artifact into trace rows."""
+    dl_path = art.download(f"/tmp/better_weave_artifacts/{entity}_{project}/{run_id}/{art.version}")
+    table_files = list(Path(dl_path).glob("*.table.json"))
+    if not table_files:
+        return []
+    with open(table_files[0]) as f:
+        table = json.load(f)
+    columns = table.get("columns", [])
+    traces = []
+    for row in table.get("data", []):
+        row_dict = dict(zip(columns, row))
+        traces.append({
+            "id": f"{run_id}-v{art.version}-{len(traces)}",
+            "step": row_dict.get("step"),
+            "called": row_dict.get("called", ""),
+            "dataset_name": row_dict.get("dataset_name", ""),
+            "status": row_dict.get("status", ""),
+            "prompt": str(row_dict.get("prompt", ""))[:500],
+            "label": str(row_dict.get("label", ""))[:500] if row_dict.get("label") else "",
+            "trajectory": row_dict.get("trajectory", ""),
+            "reward": row_dict.get("reward"),
+            "env_reward": row_dict.get("env_reward"),
+            "failure_reason": row_dict.get("failure_reason", ""),
+            "error": row_dict.get("error", ""),
+            "n_turns": row_dict.get("num_steps", 0),
+            "num_tool_calls": row_dict.get("num_tool_calls", 0),
+            "response_length": row_dict.get("response_length", 0),
+            "verifier_outcome": row_dict.get("verifier_outcome", ""),
+            "grader_responses": row_dict.get("grader_responses", ""),
+            "duration": row_dict.get("duration", 0),
+            "time_env_create": row_dict.get("time_env_create", 0),
+            "time_agent_invoke": row_dict.get("time_agent_invoke", 0),
+            "time_verify": row_dict.get("time_verify", 0),
+            "time_cleanup": row_dict.get("time_cleanup", 0),
+            "artifact_version": art.version,
+        })
+    return traces
+
+
+def _fetch_trace_versions(entity: str, project: str, run_id: str, versions: list[int]) -> dict[str, Any]:
+    """Fetch specific trajectory artifact versions."""
+    api = _wandb.Api()
+    run = api.run(f"{entity}/{project}/{run_id}")
+    all_arts = list(run.logged_artifacts())
+    traj_arts = [a for a in all_arts if "TrajectoryDetails" in a.name]
+    traj_arts.sort(key=lambda a: a.version)
+    version_set = set(versions)
+    selected = [a for a in traj_arts if a.version in version_set]
+    logger.info(f"Fetching versions {versions} ({len(selected)} found) for {run_id}")
 
     traces: list[dict] = []
     for art in selected:
         try:
-            dl_path = art.download(f"/tmp/better_weave_artifacts/{entity}_{project}/{run_id}/{art.version}")
-            table_files = list(Path(dl_path).glob("*.table.json"))
-            if not table_files:
-                continue
-            with open(table_files[0]) as f:
-                table = json.load(f)
-            columns = table.get("columns", [])
-            for row in table.get("data", []):
-                row_dict = dict(zip(columns, row))
-                traces.append({
-                    "id": f"{run_id}-v{art.version}-{len(traces)}",
-                    "step": row_dict.get("step"),
-                    "called": row_dict.get("called", ""),
-                    "dataset_name": row_dict.get("dataset_name", ""),
-                    "status": row_dict.get("status", ""),
-                    "prompt": str(row_dict.get("prompt", ""))[:500],
-                    "label": str(row_dict.get("label", ""))[:500] if row_dict.get("label") else "",
-                    "trajectory": row_dict.get("trajectory", ""),
-                    "reward": row_dict.get("reward"),
-                    "env_reward": row_dict.get("env_reward"),
-                    "failure_reason": row_dict.get("failure_reason", ""),
-                    "error": row_dict.get("error", ""),
-                    "n_turns": row_dict.get("num_steps", 0),
-                    "num_tool_calls": row_dict.get("num_tool_calls", 0),
-                    "response_length": row_dict.get("response_length", 0),
-                    "verifier_outcome": row_dict.get("verifier_outcome", ""),
-                    "grader_responses": row_dict.get("grader_responses", ""),
-                    "duration": row_dict.get("duration", 0),
-                    "time_env_create": row_dict.get("time_env_create", 0),
-                    "time_agent_invoke": row_dict.get("time_agent_invoke", 0),
-                    "time_verify": row_dict.get("time_verify", 0),
-                    "time_cleanup": row_dict.get("time_cleanup", 0),
-                    "artifact_version": art.version,
-                })
-            logger.info(f"  v{art.version}: {len(table.get('data', []))} rows")
+            rows = _parse_trace_artifact(art, entity, project, run_id)
+            traces.extend(rows)
+            logger.info(f"  v{art.version}: {len(rows)} rows")
         except Exception as e:
             logger.warning(f"  Failed to fetch artifact v{art.version}: {e}")
 
@@ -314,20 +331,64 @@ def get_run_history(
         raise HTTPException(status_code=404, detail=f"History for {run_id} not available: {e}")
 
 
-_traces_loading: dict[str, float] = {}  # run_id -> start timestamp
+_traces_loading: dict[str, float] = {}  # "run_id" or "run_id:v3" -> start timestamp
 
 
-def _bg_fetch_traces(ent: str, proj: str, run_id: str) -> None:
+def _bg_list_versions(ent: str, proj: str, run_id: str) -> None:
+    """Background: list available versions, then auto-fetch first + last."""
+    key = run_id
     try:
-        logger.info(f"Background: fetching traces for {run_id}")
-        data = _fetch_traces(ent, proj, run_id)
-        _write_cache(ent, proj, data, f"{run_id}_traces.json")
-        logger.info(f"Background: cached {data.get('count', 0)} traces for {run_id}")
+        versions = _list_trace_versions(ent, proj, run_id)
+        meta = {"versions": versions, "loaded_versions": [], "source": "versions_listed"}
+        _write_cache(ent, proj, meta, f"{run_id}_traces_meta.json")
+        logger.info(f"Background: {run_id} has {len(versions)} trace versions")
+
+        if versions:
+            # Auto-fetch first (step 0) and last version
+            to_fetch = [versions[0]["version"]]
+            if len(versions) > 1:
+                to_fetch.append(versions[-1]["version"])
+            data = _fetch_trace_versions(ent, proj, run_id, to_fetch)
+            data["versions"] = versions
+            data["loaded_versions"] = to_fetch
+            _write_cache(ent, proj, data, f"{run_id}_traces.json")
+            logger.info(f"Background: loaded v{to_fetch} for {run_id} ({data['count']} traces)")
+        else:
+            _write_cache(ent, proj,
+                         {"traces": [], "count": 0, "source": "no_artifacts", "versions": [], "loaded_versions": []},
+                         f"{run_id}_traces.json")
     except Exception as e:
-        logger.warning(f"Background trace fetch failed for {run_id}: {e}")
-        _write_cache(ent, proj, {"traces": [], "count": 0, "source": "error"}, f"{run_id}_traces.json")
+        logger.warning(f"Background list versions failed for {run_id}: {e}")
+        _write_cache(ent, proj,
+                     {"traces": [], "count": 0, "source": "error", "versions": [], "loaded_versions": []},
+                     f"{run_id}_traces.json")
     finally:
-        _traces_loading.pop(run_id, None)
+        _traces_loading.pop(key, None)
+
+
+def _bg_fetch_version(ent: str, proj: str, run_id: str, version: int) -> None:
+    """Background: fetch a single version and merge into cached traces."""
+    key = f"{run_id}:v{version}"
+    try:
+        data = _fetch_trace_versions(ent, proj, run_id, [version])
+        # Merge into existing cache
+        cached = _read_cache(ent, proj, f"{run_id}_traces.json") or {
+            "traces": [], "count": 0, "versions": [], "loaded_versions": []
+        }
+        cached["traces"].extend(data["traces"])
+        cached["count"] = len(cached["traces"])
+        loaded = cached.get("loaded_versions", [])
+        if version not in loaded:
+            loaded.append(version)
+            loaded.sort()
+        cached["loaded_versions"] = loaded
+        cached["source"] = "artifacts"
+        _write_cache(ent, proj, cached, f"{run_id}_traces.json")
+        logger.info(f"Background: loaded v{version} for {run_id} (+{data['count']} traces)")
+    except Exception as e:
+        logger.warning(f"Background fetch v{version} failed for {run_id}: {e}")
+    finally:
+        _traces_loading.pop(key, None)
 
 
 @app.get("/api/runs/{run_id}/traces")
@@ -335,28 +396,46 @@ def get_run_traces(
     run_id: str,
     entity: str | None = None,
     project: str | None = None,
-    refresh: bool = False,
+    version: int | None = None,
 ) -> dict[str, Any]:
-    """Get traces. Fetches in background, frontend polls until ready."""
+    """Get traces. First call lists versions + loads first/last. Use ?version=N to load more."""
     ent = entity or DEFAULT_ENTITY
     proj = project or DEFAULT_PROJECT
 
+    # Request to load a specific version
+    if version is not None:
+        vkey = f"{run_id}:v{version}"
+        cached = _read_cache(ent, proj, f"{run_id}_traces.json")
+        if cached and version in cached.get("loaded_versions", []):
+            return cached  # already loaded
+
+        if vkey in _traces_loading:
+            if time.time() - _traces_loading[vkey] < 120:
+                return cached or {"traces": [], "count": 0, "source": "loading"}
+            _traces_loading.pop(vkey, None)
+
+        if _wandb_reachable():
+            _traces_loading[vkey] = time.time()
+            threading.Thread(target=_bg_fetch_version, args=(ent, proj, run_id, version), daemon=True).start()
+        return cached or {"traces": [], "count": 0, "source": "loading"}
+
+    # Default: return cached data or start initial load
     cached = _read_cache(ent, proj, f"{run_id}_traces.json")
-    if cached and cached.get("count", 0) > 0 and not refresh:
+    if cached and cached.get("source") not in (None, "loading"):
         return cached
 
-    # Already fetching? (with 120s timeout for stale entries)
-    if run_id in _traces_loading:
-        if time.time() - _traces_loading[run_id] < 120:
-            return {"traces": [], "count": 0, "source": "loading"}
-        _traces_loading.pop(run_id, None)
+    key = run_id
+    if key in _traces_loading:
+        if time.time() - _traces_loading[key] < 120:
+            return {"traces": [], "count": 0, "source": "loading", "versions": [], "loaded_versions": []}
+        _traces_loading.pop(key, None)
 
     if _wandb_reachable():
-        _traces_loading[run_id] = time.time()
-        threading.Thread(target=_bg_fetch_traces, args=(ent, proj, run_id), daemon=True).start()
-        return {"traces": [], "count": 0, "source": "loading"}
+        _traces_loading[key] = time.time()
+        threading.Thread(target=_bg_list_versions, args=(ent, proj, run_id), daemon=True).start()
+        return {"traces": [], "count": 0, "source": "loading", "versions": [], "loaded_versions": []}
 
-    return {"traces": [], "count": 0, "source": "not_available"}
+    return {"traces": [], "count": 0, "source": "not_available", "versions": [], "loaded_versions": []}
 
 
 # ---------- AI Assistant ----------
