@@ -199,10 +199,14 @@
           if (s) params.search = s;
           const data = await api.runs(params);
           setRuns(data);
-          // If we have a selectedRunId from hash but only a stub, upgrade it
+          // If we have a selectedRunId from hash, try to upgrade to full object
           if (selectedRunId && onSelectRun) {
             const full = data.find(r => r.id === selectedRunId);
-            if (full && full.display_name) onSelectRun(full, true);
+            if (full) {
+              onSelectRun(full, true);  // upgrade stub to full run object
+            } else {
+              onSelectRun(null);  // run not in this project, clear selection
+            }
           }
         } catch (e) {
           console.error('Failed to fetch runs:', e);
@@ -1304,8 +1308,8 @@
         setSelectedRun(run);
         if (!fromRestore) {
           setSelectedTrace(null); setRestoredTraceIdx(null);
-          writeHash({ entity, project, run: run?.id || '', trace: '' });
         }
+        writeHash({ entity, project, run: run?.id || '', trace: fromRestore ? readHash().trace : '' });
       };
       const handleSelectTrace = (trace) => {
         setSelectedTrace(trace);
