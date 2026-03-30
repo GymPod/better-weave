@@ -8,9 +8,11 @@ AI assistant powered by Bedrock Claude.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import traceback
@@ -34,6 +36,7 @@ CACHE_DIR = Path(os.environ.get("BETTER_WEAVE_CACHE", "/tmp/better_weave_cache")
 WANDB_BASE_URL = os.environ.get("WANDB_BASE_URL", "https://wandb.agi.amazon.dev")
 DEFAULT_ENTITY = os.environ.get("BETTER_WEAVE_ENTITY", "autonomy")
 DEFAULT_PROJECT = os.environ.get("BETTER_WEAVE_PROJECT", "slime-agent")
+LOCAL_DATA_DIR = Path(os.environ.get("BETTER_WEAVE_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
 
 # ---------- Cache helpers ----------
@@ -194,6 +197,35 @@ def _list_trace_versions(entity: str, project: str, run_id: str) -> list[dict[st
     return [{"version": a.version, "name": a.name} for a in traj_arts]
 
 
+def _row_dict_to_trace(row_dict: dict, trace_id: str) -> dict:
+    """Convert a column-keyed row dict into a normalized trace dict."""
+    return {
+        "id": trace_id,
+        "step": row_dict.get("step"),
+        "called": row_dict.get("called", ""),
+        "dataset_name": row_dict.get("dataset_name", ""),
+        "status": row_dict.get("status", ""),
+        "prompt": str(row_dict.get("prompt", "")),
+        "label": str(row_dict.get("label", "")) if row_dict.get("label") else "",
+        "trajectory": row_dict.get("trajectory", ""),
+        "response": row_dict.get("response", ""),
+        "reward": row_dict.get("reward"),
+        "env_reward": row_dict.get("env_reward"),
+        "failure_reason": row_dict.get("failure_reason", ""),
+        "error": row_dict.get("error", ""),
+        "n_turns": row_dict.get("num_steps", 0),
+        "num_tool_calls": row_dict.get("num_tool_calls", 0),
+        "response_length": row_dict.get("response_length", 0),
+        "verifier_outcome": row_dict.get("verifier_outcome", ""),
+        "grader_responses": row_dict.get("grader_responses", ""),
+        "duration": row_dict.get("duration", 0),
+        "time_env_create": row_dict.get("time_env_create", 0),
+        "time_agent_invoke": row_dict.get("time_agent_invoke", 0),
+        "time_verify": row_dict.get("time_verify", 0),
+        "time_cleanup": row_dict.get("time_cleanup", 0),
+    }
+
+
 def _parse_trace_artifact(art, entity: str, project: str, run_id: str) -> list[dict]:
     """Download and parse a single trajectory artifact into trace rows."""
     dl_path = art.download(f"/tmp/better_weave_artifacts/{entity}_{project}/{run_id}/{art.version}")
@@ -206,31 +238,9 @@ def _parse_trace_artifact(art, entity: str, project: str, run_id: str) -> list[d
     traces = []
     for row in table.get("data", []):
         row_dict = dict(zip(columns, row))
-        traces.append({
-            "id": f"{run_id}-v{art.version}-{len(traces)}",
-            "step": row_dict.get("step"),
-            "called": row_dict.get("called", ""),
-            "dataset_name": row_dict.get("dataset_name", ""),
-            "status": row_dict.get("status", ""),
-            "prompt": str(row_dict.get("prompt", "")),
-            "label": str(row_dict.get("label", "")) if row_dict.get("label") else "",
-            "trajectory": row_dict.get("trajectory", ""),
-            "reward": row_dict.get("reward"),
-            "env_reward": row_dict.get("env_reward"),
-            "failure_reason": row_dict.get("failure_reason", ""),
-            "error": row_dict.get("error", ""),
-            "n_turns": row_dict.get("num_steps", 0),
-            "num_tool_calls": row_dict.get("num_tool_calls", 0),
-            "response_length": row_dict.get("response_length", 0),
-            "verifier_outcome": row_dict.get("verifier_outcome", ""),
-            "grader_responses": row_dict.get("grader_responses", ""),
-            "duration": row_dict.get("duration", 0),
-            "time_env_create": row_dict.get("time_env_create", 0),
-            "time_agent_invoke": row_dict.get("time_agent_invoke", 0),
-            "time_verify": row_dict.get("time_verify", 0),
-            "time_cleanup": row_dict.get("time_cleanup", 0),
-            "artifact_version": art.version,
-        })
+        trace = _row_dict_to_trace(row_dict, f"{run_id}-v{art.version}-{len(traces)}")
+        trace["artifact_version"] = art.version
+        traces.append(trace)
     return traces
 
 
@@ -255,6 +265,70 @@ def _fetch_trace_versions(entity: str, project: str, run_id: str, versions: list
             logger.warning(f"  Failed to fetch artifact v{art.version}: {e}")
 
     return {"traces": traces, "count": len(traces), "source": "artifacts"}
+
+
+# ---------- Local File Support ----------
+
+
+def _parse_local_table(filepath: Path) -> list[dict]:
+    """Parse a W&B table JSON file into trace dicts."""
+    with open(filepath) as f:
+        table = json.load(f)
+    columns = table.get("columns", [])
+    traces = []
+    for row_idx, row in enumerate(table.get("data", [])):
+        row_dict = dict(zip(columns, row))
+        traces.append(_row_dict_to_trace(row_dict, f"local-{filepath.stem}-{row_idx}"))
+    return traces
+
+
+_local_file_cache: dict[str, list[dict]] = {}
+
+
+@app.get("/api/local-runs")
+def list_local_runs() -> list[dict]:
+    """List JSON table files in the data directory."""
+    results = []
+    for p in sorted(LOCAL_DATA_DIR.glob("*.json")):
+        try:
+            with open(p) as f:
+                header = json.load(f)
+            if header.get("_type", "").lower() == "table" and "columns" in header and "data" in header:
+                results.append({
+                    "id": f"local:{p.name}",
+                    "display_name": p.stem,
+                    "filename": p.name,
+                    "state": "local",
+                    "nrows": header.get("nrows", len(header.get("data", []))),
+                    "ncols": header.get("ncols", len(header.get("columns", []))),
+                    "size_mb": round(p.stat().st_size / 1024 / 1024, 1),
+                })
+        except Exception:
+            continue
+    return results
+
+
+@app.get("/api/local-runs/{filename}/traces")
+def get_local_traces(filename: str) -> dict:
+    """Load traces from a local JSON table file."""
+    filepath = LOCAL_DATA_DIR / filename
+    if not filepath.exists() or not filepath.suffix == ".json":
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+    # Ensure it's within the data dir
+    if not filepath.resolve().parent == LOCAL_DATA_DIR.resolve():
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if filename in _local_file_cache:
+        traces = _local_file_cache[filename]
+    else:
+        try:
+            traces = _parse_local_table(filepath)
+            _local_file_cache[filename] = traces
+            logger.info(f"Loaded {len(traces)} traces from {filename}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to parse {filename}: {e}")
+
+    return {"traces": traces, "count": len(traces), "source": "local"}
 
 
 # ---------- API Routes ----------
@@ -436,6 +510,101 @@ def get_run_traces(
         return {"traces": [], "count": 0, "source": "loading", "versions": [], "loaded_versions": []}
 
     return {"traces": [], "count": 0, "source": "not_available", "versions": [], "loaded_versions": []}
+
+
+# ---------- Problem Analysis Helpers ----------
+
+
+def _extract_problem_statement(prompt: str) -> str:
+    """Pull the user-facing problem from the prompt (after system instructions)."""
+    idx = prompt.find("<|im_start|>user")
+    if idx != -1:
+        text = prompt[idx + len("<|im_start|>user"):]
+        end = text.find("<|im_end|>")
+        if end != -1:
+            text = text[:end]
+        return text.strip()
+    return prompt[-3000:]
+
+
+def _validate_tests_bedrock(problem_stmt: str, never_pass_tests: list[dict], cache_key: str) -> list[dict]:
+    """Call Claude Haiku to evaluate whether never-pass tests are valid. Cached."""
+    cache_path = CACHE_DIR / "test_validity" / f"{cache_key}.json"
+    if cache_path.exists():
+        return json.loads(cache_path.read_text())
+
+    tests_desc = ""
+    for t in never_pass_tests:
+        tests_desc += f"\nTest {t['test_index']}:\n"
+        tests_desc += f"  Input: {str(t.get('input', ''))[:2000]}\n"
+        tests_desc += f"  Expected Output: {str(t.get('expected', ''))[:2000]}\n"
+
+    prompt_text = f"""You are reviewing test cases for a competitive programming problem. Every sample solution fails these tests — not a single attempt passes them. Your job is to determine if each test case is valid according to the problem's stated constraints and expected behavior.
+
+Here is the FULL problem statement:
+
+<problem>
+{problem_stmt}
+</problem>
+
+TESTS THAT NEVER PASS (every solution attempt fails these):
+{tests_desc}
+
+For each test, respond with a JSON array of objects, one per test, with these fields:
+- "test_index": the test number
+- "verdict": "valid", "likely_invalid", or "suspicious"
+- "reason": a brief explanation (1-2 sentences)
+
+Consider:
+- IMPORTANT: Check that every value in the test input falls within the ranges and constraints specified in the problem statement (e.g. if the problem says 1 <= N <= 100, verify N is in [1,100]). Flag any out-of-range inputs as likely_invalid.
+- Check that the input format matches what the problem specifies (correct number of values, correct types, etc.)
+- Is the expected output mathematically/logically correct for the given input and the problem's described algorithm?
+- Could this be an edge case that's genuinely hard, or is the test itself wrong?
+
+Respond ONLY with the JSON array, no other text."""
+
+    client = boto3.client("bedrock-runtime", region_name="us-west-2")
+    resp = client.invoke_model(
+        modelId="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        body=json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 8192,
+            "messages": [{"role": "user", "content": prompt_text}],
+        }),
+    )
+    response_text = json.loads(resp["body"].read())["content"][0]["text"]
+
+    try:
+        match = re.search(r'\[.*\]', response_text, re.DOTALL)
+        if match:
+            results = json.loads(match.group())
+        else:
+            results = [{"test_index": t["test_index"], "verdict": "error", "reason": "Could not parse LLM response"} for t in never_pass_tests]
+    except json.JSONDecodeError:
+        results = [{"test_index": t["test_index"], "verdict": "error", "reason": "Could not parse LLM response"} for t in never_pass_tests]
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(results, indent=2))
+    return results
+
+
+class ValidateTestsRequest(BaseModel):
+    problem_statement: str
+    never_pass_tests: list[dict]
+
+
+@app.post("/api/validate-tests")
+def validate_tests(req: ValidateTestsRequest) -> list[dict]:
+    """Validate never-pass tests via Bedrock Claude Haiku."""
+    cache_content = req.problem_statement + "||" + "||".join(
+        str(t.get("input", "")) for t in req.never_pass_tests
+    )
+    cache_key = hashlib.md5(cache_content.encode()).hexdigest()
+    try:
+        return _validate_tests_bedrock(req.problem_statement, req.never_pass_tests, cache_key)
+    except Exception as e:
+        logger.error(f"Test validation failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Validation failed: {e}")
 
 
 # ---------- AI Assistant ----------

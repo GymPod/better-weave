@@ -109,6 +109,8 @@
       traces: (id, version) => api.get(`${_apiBase}/runs/${id}/traces?${api._ep(version != null ? {version} : {})}`),
       ask: (body) => api.post(`${_apiBase}/ask`, { ...body, entity: _apiEntity, project: _apiProject }),
       config: () => api.get(`${_apiBase}/config`),
+      localRuns: () => api.get(`${_apiBase}/local-runs`),
+      localTraces: (filename) => api.get(`${_apiBase}/local-runs/${encodeURIComponent(filename)}/traces`),
     };
 
     // ---- Shared Components ----
@@ -186,6 +188,7 @@
     // ---- Run List ----
     function RunList({ onSelectRun, selectedRunId, refreshTrigger }) {
       const [runs, setRuns] = useState([]);
+      const [localRuns, setLocalRuns] = useState([]);
       const [loading, setLoading] = useState(true);
       const [search, setSearch] = useState('');
       const [stateFilter, setStateFilter] = useState('');
@@ -193,19 +196,16 @@
       const doFetch = async (s, f) => {
         setLoading(true);
         try {
-          const params = { limit: 50 };
-          if (f) params.state = f;
-          if (s) params.search = s;
-          const data = await api.runs(params);
-          setRuns(data);
-          // If we have a selectedRunId from hash, try to upgrade to full object
+          const [remoteData, localData] = await Promise.all([
+            api.runs({ limit: 50, ...(f ? {state: f} : {}), ...(s ? {search: s} : {}) }).catch(() => []),
+            api.localRuns().catch(() => []),
+          ]);
+          setRuns(remoteData);
+          setLocalRuns(localData);
           if (selectedRunId && onSelectRun) {
-            const full = data.find(r => r.id === selectedRunId);
-            if (full) {
-              onSelectRun(full, true);  // upgrade stub to full run object
-            } else {
-              onSelectRun(null);  // run not in this project, clear selection
-            }
+            const full = remoteData.find(r => r.id === selectedRunId) ||
+                         localData.find(r => r.id === selectedRunId);
+            if (full) onSelectRun(full, true);
           }
         } catch (e) {
           console.error('Failed to fetch runs:', e);
@@ -239,27 +239,64 @@
           <div className="flex-1 overflow-y-auto scrollbar-thin">
             {loading ? (
               <div className="flex items-center justify-center py-8"><Spinner /></div>
-            ) : runs.map(run => (
-              <button key={run.id}
-                onClick={() => onSelectRun(run)}
-                className={`w-full text-left px-3 py-2.5 border-b transition-colors ${C.borderSoft} ${
-                  selectedRunId === run.id ? `${C.activeBg}` : C.hoverBg
-                }`}>
-                <div className="flex items-center gap-1.5">
-                  <StateIcon state={run.state} />
-                  <span className={`text-sm font-medium truncate flex-1 ${C.text}`}>{run.display_name}</span>
-                </div>
-                <div className="flex items-center gap-2 mt-1">
-                  <span className={`text-xs mono ${C.textMuted}`}>{run.id}</span>
-                  <Badge color={run.state === 'running' ? 'green' : run.state === 'finished' ? 'gray' : 'red'}>
-                    {run.state}
-                  </Badge>
-                  {run.history_count > 0 && (
-                    <span className={`text-xs ${C.textMuted}`}>{run.history_count} steps</span>
-                  )}
-                </div>
-              </button>
-            ))}
+            ) : (
+              <>
+                {/* Local files */}
+                {localRuns.length > 0 && (
+                  <>
+                    <div className={`px-3 py-1.5 text-xs font-medium uppercase tracking-wider ${C.textFaint} ${C.bgMuted} border-b ${C.border}`}>
+                      Local Files
+                    </div>
+                    {localRuns.map(lr => (
+                      <button key={lr.id}
+                        onClick={() => onSelectRun(lr)}
+                        className={`w-full text-left px-3 py-2.5 border-b transition-colors ${C.borderSoft} ${
+                          selectedRunId === lr.id ? C.activeBg : C.hoverBg
+                        }`}>
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-2 rounded-full bg-purple-500 mr-1.5"></span>
+                          <span className={`text-sm font-medium truncate flex-1 ${C.text}`}>{lr.display_name}</span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-1">
+                          <Badge color="purple">local</Badge>
+                          <span className={`text-xs ${C.textMuted}`}>{lr.nrows} rows</span>
+                          <span className={`text-xs ${C.textMuted}`}>{lr.size_mb} MB</span>
+                        </div>
+                      </button>
+                    ))}
+                  </>
+                )}
+                {/* Remote W&B runs */}
+                {runs.length > 0 && (
+                  <>
+                    <div className={`px-3 py-1.5 text-xs font-medium uppercase tracking-wider ${C.textFaint} ${C.bgMuted} border-b ${C.border}`}>
+                      W&B Runs
+                    </div>
+                    {runs.map(run => (
+                      <button key={run.id}
+                        onClick={() => onSelectRun(run)}
+                        className={`w-full text-left px-3 py-2.5 border-b transition-colors ${C.borderSoft} ${
+                          selectedRunId === run.id ? C.activeBg : C.hoverBg
+                        }`}>
+                        <div className="flex items-center gap-1.5">
+                          <StateIcon state={run.state} />
+                          <span className={`text-sm font-medium truncate flex-1 ${C.text}`}>{run.display_name}</span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className={`text-xs mono ${C.textMuted}`}>{run.id}</span>
+                          <Badge color={run.state === 'running' ? 'green' : run.state === 'finished' ? 'gray' : 'red'}>
+                            {run.state}
+                          </Badge>
+                          {run.history_count > 0 && (
+                            <span className={`text-xs ${C.textMuted}`}>{run.history_count} steps</span>
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  </>
+                )}
+              </>
+            )}
           </div>
         </div>
       );
@@ -290,8 +327,9 @@
 
     // ---- Run Detail Panel ----
     function RunDetail({ run, onSelectTrace, restoredTraceIdx }) {
+      const isLocal = run.id?.startsWith('local:');
       const hasRestoredTrace = restoredTraceIdx != null;
-      const [tab, setTab] = useState(hasRestoredTrace ? 'traces' : 'metrics');
+      const [tab, setTab] = useState(isLocal ? 'analysis' : (hasRestoredTrace ? 'traces' : 'metrics'));
       const [detail, setDetail] = useState(null);
       const [history, setHistory] = useState(null);
       const [traces, setTraces] = useState(null);
@@ -299,6 +337,20 @@
 
       useEffect(() => {
         setLoading(true);
+        if (isLocal) {
+          setTab('analysis');
+          // Load local file traces directly
+          const filename = run.filename || run.id.replace('local:', '');
+          api.localTraces(filename).then(data => {
+            setTraces(data);
+            setLoading(false);
+          }).catch(e => {
+            console.error('Failed to load local file:', e);
+            setTraces({ traces: [], count: 0, source: 'error' });
+            setLoading(false);
+          });
+          return;
+        }
         if (!hasRestoredTrace) setTab('metrics');
         setDetail(null);
         setHistory(null);
@@ -319,7 +371,7 @@
 
       // Poll while loading (initial load or version load)
       useEffect(() => {
-        if (tab !== 'traces') return;
+        if (tab !== 'traces' && tab !== 'analysis') return;
         const needsPoll = traces?.source === 'loading' ||
           (traces?._loadingVersion != null);
         if (!needsPoll) return;
@@ -339,7 +391,7 @@
         return () => clearInterval(timer);
       }, [tab, run.id, traces?.source, traces?._loadingVersion, traces?.loaded_versions?.length]);
 
-      useEffect(() => { if (tab === 'traces') loadTraces(); }, [tab, run.id]);
+      useEffect(() => { if (tab === 'traces' || tab === 'analysis') loadTraces(); }, [tab, run.id]);
 
       const loadVersion = (version) => {
         setTraces(prev => ({ ...prev, _loadingVersion: version }));
@@ -383,7 +435,7 @@
 
           {/* Tabs */}
           <div className={`flex border-b ${C.border} px-4`}>
-            {['metrics', 'config', 'traces'].map(t => (
+            {(isLocal ? ['analysis', 'traces'] : ['metrics', 'config', 'traces', 'analysis']).map(t => (
               <button key={t}
                 onClick={() => setTab(t)}
                 className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
@@ -399,6 +451,7 @@
             {tab === 'metrics' && <MetricsTab history={history} metricGroups={metricGroups} />}
             {tab === 'config' && <ConfigTab detail={detail} />}
             {tab === 'traces' && (traces?.source === 'loading' && !traces?.versions?.length ? <div className="flex items-center gap-2 p-4"><Spinner /> <span className={C.textSecondary}>Fetching trajectories from W&B artifacts...</span></div> : <TracesTab traces={traces} run={run} onSelectTrace={onSelectTrace} restoredTraceIdx={restoredTraceIdx} onLoadVersion={loadVersion} />)}
+            {tab === 'analysis' && <AnalysisTab traces={traces} loadTraces={loadTraces} />}
           </div>
         </div>
       );
@@ -781,6 +834,611 @@
       );
     }
 
+    // ---- Analysis Tab (ported from build_dashboard.py) ----
+
+    function extractProblemStatement(prompt) {
+      const idx = (prompt || '').indexOf('<|im_start|>user');
+      if (idx !== -1) {
+        let text = prompt.slice(idx + '<|im_start|>user'.length);
+        const end = text.indexOf('<|im_end|>');
+        if (end !== -1) text = text.slice(0, end);
+        return text.trim();
+      }
+      return (prompt || '').slice(-3000);
+    }
+
+    function extractLastCodeBlock(text) {
+      const blocks = [...(text || '').matchAll(/```(?:\w*)\n([\s\S]*?)```/g)];
+      if (blocks.length > 0) return blocks[blocks.length - 1][1].trim();
+      return text || '';
+    }
+
+    function parseGraderResponses(gr) {
+      if (!gr || typeof gr !== 'string') return null;
+      try {
+        // Python repr → JSON: True→true, False→false, None→null, single→double quotes
+        let s = gr.replace(/'/g, '"').replace(/\bTrue\b/g, 'true').replace(/\bFalse\b/g, 'false').replace(/\bNone\b/g, 'null');
+        return JSON.parse(s);
+      } catch {
+        // Try eval-style via Function (grader_responses is trusted server data)
+        try {
+          const s2 = gr.replace(/\bTrue\b/g, 'true').replace(/\bFalse\b/g, 'false').replace(/\bNone\b/g, 'null');
+          return (new Function('return ' + s2))();
+        } catch { return null; }
+      }
+    }
+
+    function sequenceMatcherRatio(a, b) {
+      if (!a && !b) return 1;
+      if (!a || !b) return 0;
+      // Simple LCS-based similarity (good enough for dashboard)
+      const m = a.length, n = b.length;
+      if (m === 0 || n === 0) return 0;
+      // For very long strings, sample
+      const maxLen = 2000;
+      const sa = a.length > maxLen ? a.slice(0, maxLen) : a;
+      const sb = b.length > maxLen ? b.slice(0, maxLen) : b;
+      const ml = sa.length, nl = sb.length;
+      // Use two-row DP for LCS length
+      let prev = new Uint16Array(nl + 1);
+      let curr = new Uint16Array(nl + 1);
+      for (let i = 1; i <= ml; i++) {
+        for (let j = 1; j <= nl; j++) {
+          if (sa[i-1] === sb[j-1]) curr[j] = prev[j-1] + 1;
+          else curr[j] = Math.max(prev[j], curr[j-1]);
+        }
+        [prev, curr] = [curr, prev];
+        curr.fill(0);
+      }
+      const lcs = prev[nl];
+      return 2 * lcs / (ml + nl);
+    }
+
+    function mds2d(distMatrix) {
+      const n = distMatrix.length;
+      if (n <= 1) return [[0, 0]];
+      if (n === 2) return [[0, 0], [distMatrix[0][1], 0]];
+
+      // Double-center squared distance matrix
+      const D2 = distMatrix.map(row => row.map(v => v * v));
+      const rowMeans = D2.map(row => row.reduce((a, b) => a + b, 0) / n);
+      const colMeans = Array(n).fill(0);
+      for (let j = 0; j < n; j++) {
+        for (let i = 0; i < n; i++) colMeans[j] += D2[i][j];
+        colMeans[j] /= n;
+      }
+      const grandMean = rowMeans.reduce((a, b) => a + b, 0) / n;
+      const B = D2.map((row, i) => row.map((v, j) => -0.5 * (v - rowMeans[i] - colMeans[j] + grandMean)));
+
+      // Power iteration for top 2 eigenvectors
+      function powerIter(mat, deflateVec) {
+        let v = Array.from({length: n}, () => Math.random() - 0.5);
+        if (deflateVec) {
+          const dot = v.reduce((s, vi, i) => s + vi * deflateVec[i], 0);
+          v = v.map((vi, i) => vi - dot * deflateVec[i]);
+        }
+        let norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+        v = v.map(x => x / norm);
+        for (let iter = 0; iter < 200; iter++) {
+          let w = mat.map(row => row.reduce((s, bj, j) => s + bj * v[j], 0));
+          if (deflateVec) {
+            const dot = w.reduce((s, wi, i) => s + wi * deflateVec[i], 0);
+            w = w.map((wi, i) => wi - dot * deflateVec[i]);
+          }
+          const eigenval = Math.sqrt(w.reduce((s, x) => s + x * x, 0));
+          if (eigenval < 1e-10) return [0, v];
+          v = w.map(x => x / eigenval);
+          norm = eigenval;
+        }
+        return [norm, v];
+      }
+
+      const [e1, v1] = powerIter(B, null);
+      const [e2, v2] = powerIter(B, v1);
+      const s1 = Math.sqrt(Math.max(0, e1));
+      const s2 = Math.sqrt(Math.max(0, e2));
+      return Array.from({length: n}, (_, i) => [v1[i] * s1, v2[i] * s2]);
+    }
+
+    function groupTracesByProblem(traces) {
+      const groups = {};
+      for (const t of traces) {
+        const key = t.prompt || '';
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(t);
+      }
+
+      const stats = Object.entries(groups).map(([prompt, members]) => {
+        let totalTests = [], passedTests = [], allFailMembers = [], nonFailMembers = [];
+
+        for (const t of members) {
+          const parsed = parseGraderResponses(t.grader_responses);
+          const tests = parsed?.test_results || [];
+          const nTotal = tests.length;
+          const nPassed = tests.filter(t => t.passed).length;
+          if (nTotal > 0) {
+            totalTests.push(nTotal);
+            passedTests.push(nPassed);
+            if (nPassed === 0) allFailMembers.push({ trace: t, parsed });
+            else nonFailMembers.push({ trace: t, parsed });
+          } else {
+            // No grader data
+            totalTests.push(0);
+            passedTests.push(0);
+            nonFailMembers.push({ trace: t, parsed: { test_results: [] } });
+          }
+        }
+
+        const avgPassed = passedTests.length > 0 ? passedTests.reduce((a, b) => a + b, 0) / passedTests.length : 0;
+        const avgTotal = totalTests.length > 0 ? totalTests.reduce((a, b) => a + b, 0) / totalTests.length : 0;
+
+        // Pairwise edit distance on code blocks
+        const codeBlocks = members.map(t => extractLastCodeBlock(t.trajectory || ''));
+        const n = codeBlocks.length;
+        const distMatrix = Array.from({length: n}, () => Array(n).fill(0));
+        for (let i = 0; i < n; i++) {
+          for (let j = i + 1; j < n; j++) {
+            const d = 1 - sequenceMatcherRatio(codeBlocks[i], codeBlocks[j]);
+            distMatrix[i][j] = d;
+            distMatrix[j][i] = d;
+          }
+        }
+        let pairCount = n * (n - 1) / 2;
+        let avgDist = pairCount > 0 ? distMatrix.reduce((s, row, i) => s + row.slice(i+1).reduce((a, b) => a + b, 0), 0) / pairCount : 0;
+
+        return {
+          prompt, members, numSamples: members.length,
+          avgPassed, avgTotal,
+          numAllFail: allFailMembers.length,
+          allFailMembers, nonFailMembers,
+          distMatrix, avgDist,
+          passCounts: passedTests,
+          shortPrompt: prompt.replace(/\n/g, ' ').trim().slice(0, 200),
+        };
+      });
+
+      stats.sort((a, b) => a.avgPassed - b.avgPassed);
+      return stats;
+    }
+
+    function AnalysisTab({ traces, loadTraces }) {
+      const [filter, setFilter] = useState('all');
+
+      useEffect(() => { if (!traces || traces.source === 'loading') loadTraces?.(); }, []);
+
+      if (!traces || traces.source === 'loading') {
+        return <div className="flex items-center gap-2 p-4"><Spinner /> <span className={C.textSecondary}>Loading traces for analysis...</span></div>;
+      }
+      if (!traces.traces?.length) {
+        return <p className={C.textMuted}>No traces available for analysis.</p>;
+      }
+
+      // Filter to code_contests only (matching build_dashboard.py)
+      const ccTraces = traces.traces.filter(t => t.dataset_name === 'code_contests');
+      if (!ccTraces.length) {
+        return <p className={C.textMuted}>No code_contests traces found. Analysis requires code_contests data.</p>;
+      }
+
+      const groups = groupTracesByProblem(ccTraces);
+      const totalProblems = groups.length;
+      const totalSamples = groups.reduce((s, g) => s + g.numSamples, 0);
+      const totalAllFail = groups.reduce((s, g) => s + g.numAllFail, 0);
+      const problemsWithAllFail = groups.filter(g => g.numAllFail > 0).length;
+
+      const filteredGroups = groups.filter(g => {
+        if (filter === 'has-fail') return g.numAllFail > 0;
+        if (filter === 'all-fail-only') return g.numAllFail === g.numSamples;
+        return true;
+      });
+
+      return (
+        <div className="space-y-4 fade-in">
+          {/* Summary stats */}
+          <div className="grid grid-cols-4 gap-3">
+            <div className={`p-3 rounded-lg border ${C.bgSoft} ${C.border} text-center`}>
+              <div className={`text-xs ${C.textMuted}`}>Problems</div>
+              <div className={`text-2xl font-semibold ${C.text}`}>{totalProblems}</div>
+            </div>
+            <div className={`p-3 rounded-lg border ${C.bgSoft} ${C.border} text-center`}>
+              <div className={`text-xs ${C.textMuted}`}>Total Samples</div>
+              <div className={`text-2xl font-semibold ${C.text}`}>{totalSamples}</div>
+            </div>
+            <div className={`p-3 rounded-lg border ${C.bgSoft} ${C.border} text-center`}>
+              <div className={`text-xs ${C.textMuted}`}>All-Fail Samples</div>
+              <div className="text-2xl font-semibold text-red-500">{totalAllFail}</div>
+            </div>
+            <div className={`p-3 rounded-lg border ${C.bgSoft} ${C.border} text-center`}>
+              <div className={`text-xs ${C.textMuted}`}>Problems w/ All Failures</div>
+              <div className="text-2xl font-semibold text-yellow-500">{problemsWithAllFail}</div>
+            </div>
+          </div>
+
+          {/* Filter bar */}
+          <div className="flex items-center gap-2">
+            <span className={`text-xs ${C.textMuted}`}>Show:</span>
+            {[['all', 'All problems'], ['has-fail', 'Has all-fail samples'], ['all-fail-only', 'Every sample fails']].map(([val, label]) => (
+              <button key={val} onClick={() => setFilter(val)}
+                className={`px-2 py-0.5 text-xs rounded transition-colors ${filter === val ? C.btnActive : C.btn}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Problem cards */}
+          {filteredGroups.map((g, idx) => (
+            <ProblemCard key={idx} group={g} index={idx} globalGroups={groups} />
+          ))}
+        </div>
+      );
+    }
+
+    function ProblemCard({ group: g, index: idx, globalGroups }) {
+      const [open, setOpen] = useState(false);
+      const [subTab, setSubTab] = useState('prompt');
+      const pct = g.avgTotal > 0 ? (g.avgPassed / g.avgTotal * 100) : 0;
+      const barColor = pct < 25 ? '#ef4444' : pct < 60 ? '#eab308' : '#22c55e';
+
+      return (
+        <div className={`rounded-lg border overflow-hidden ${C.border} ${C.bgSoft}`}>
+          {/* Header */}
+          <button onClick={() => setOpen(!open)}
+            className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors ${C.hoverBg}`}>
+            <span className={`text-xs ${C.textFaint} transition-transform ${open ? 'rotate-90' : ''}`}>&#9654;</span>
+            <span className={`text-sm flex-1 truncate ${C.text}`}>
+              <span className={C.textMuted}>#{idx + 1}</span> {g.shortPrompt.slice(0, 120)}
+            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              <Badge color="blue">{g.numSamples} samples</Badge>
+              <Badge color="red">{g.numAllFail} all-fail</Badge>
+              <Badge color="green">avg {g.avgPassed.toFixed(1)}/{g.avgTotal.toFixed(0)}</Badge>
+              <Badge color="gray">div: {g.avgDist.toFixed(2)}</Badge>
+              <div className="w-24 h-2 bg-gray-700 rounded-full overflow-hidden">
+                <div className="h-full rounded-full" style={{width: `${pct}%`, background: barColor}} />
+              </div>
+            </div>
+          </button>
+
+          {/* Body */}
+          {open && (
+            <div className={`border-t px-4 py-3 ${C.border}`}>
+              {/* Sub-tabs */}
+              <div className="flex gap-1 mb-3">
+                {['prompt', 'tests', 'diversity', 'responses', 'validity'].map(t => (
+                  <button key={t} onClick={() => setSubTab(t)}
+                    className={`px-2.5 py-1 text-xs rounded transition-colors ${subTab === t ? C.btnActive : C.btn}`}>
+                    {t.charAt(0).toUpperCase() + t.slice(1)}
+                  </button>
+                ))}
+              </div>
+
+              {subTab === 'prompt' && <PromptSubTab prompt={g.prompt} />}
+              {subTab === 'tests' && <TestGridSubTab group={g} />}
+              {subTab === 'diversity' && <DiversitySubTab group={g} globalGroups={globalGroups} />}
+              {subTab === 'responses' && <ResponsesSubTab group={g} />}
+              {subTab === 'validity' && <ValiditySubTab group={g} />}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function PromptSubTab({ prompt }) {
+      const userPrompt = extractProblemStatement(prompt);
+      return (
+        <pre className={`text-xs mono whitespace-pre-wrap max-h-96 overflow-y-auto scrollbar-thin p-3 rounded-lg border ${C.bgPanel} ${C.border} ${C.text}`}>
+          {userPrompt}
+        </pre>
+      );
+    }
+
+    function TestGridSubTab({ group: g }) {
+      const [detail, setDetail] = useState(null);
+
+      // Parse all test results
+      const allTests = g.members.map(t => {
+        const parsed = parseGraderResponses(t.grader_responses);
+        return parsed?.test_results || [];
+      });
+
+      if (!allTests.length || !allTests.some(t => t.length > 0)) {
+        return <p className={C.textMuted}>No test data.</p>;
+      }
+
+      const nSamples = allTests.length;
+      const nTests = Math.max(...allTests.map(t => t.length));
+      const cell = 20;
+      const labelW = 50;
+      const labelH = 24;
+      const w = labelW + nTests * cell + 10;
+      const h = labelH + nSamples * cell + 50;
+
+      // Failure rates per test
+      const failRates = Array.from({length: nTests}, (_, j) => {
+        let fails = 0, total = 0;
+        for (const row of allTests) {
+          if (j < row.length) { total++; if (!row[j].passed) fails++; }
+        }
+        return total > 0 ? fails / total : 0;
+      });
+
+      const alwaysFail = failRates.filter(r => r === 1).length;
+      const neverFail = failRates.filter(r => r === 0).length;
+
+      return (
+        <div>
+          <p className={`text-xs mb-2 ${C.textMuted}`}>
+            Rows = samples, Columns = tests. Click a cell for details.{' '}
+            <span className="text-red-500">{alwaysFail} always fail</span>,{' '}
+            <span className="text-green-500">{neverFail} always pass</span>,{' '}
+            {nTests - alwaysFail - neverFail} mixed.
+          </p>
+          <div className="overflow-x-auto">
+            <svg width={w} height={h} style={{fontFamily: 'JetBrains Mono, monospace', fontSize: 9}}>
+              {/* Column labels */}
+              {Array.from({length: nTests}, (_, j) => {
+                const color = failRates[j] === 1 ? '#ef4444' : failRates[j] === 0 ? '#22c55e' : '#eab308';
+                return <text key={`c${j}`} x={labelW + j * cell + cell/2} y={labelH - 5} fill={color}
+                  textAnchor="middle" fontWeight="bold" style={{cursor: 'pointer'}}
+                  onClick={() => setDetail({type: 'column', testIdx: j})}>T{j+1}</text>;
+              })}
+              {/* Grid cells */}
+              {Array.from({length: nSamples}, (_, i) => (
+                <React.Fragment key={`r${i}`}>
+                  <text x={labelW - 4} y={labelH + i * cell + cell/2 + 3} fill="#9ca3af" textAnchor="end">S{i+1}</text>
+                  {Array.from({length: nTests}, (_, j) => {
+                    const color = j < allTests[i].length ? (allTests[i][j].passed ? '#166534' : '#991b1b') : '#1f2937';
+                    return <rect key={`${i}-${j}`} x={labelW + j * cell} y={labelH + i * cell}
+                      width={cell} height={cell} fill={color} stroke="#0d1117" strokeWidth={1} rx={2}
+                      style={{cursor: 'pointer'}} onClick={() => setDetail({type: 'cell', sampleIdx: i, testIdx: j})} />;
+                  })}
+                </React.Fragment>
+              ))}
+              {/* Summary row */}
+              <text x={labelW - 4} y={labelH + nSamples * cell + 18} fill="#e5e7eb" textAnchor="end" fontWeight="bold">Fail%</text>
+              {Array.from({length: nTests}, (_, j) => {
+                const fr = failRates[j];
+                const color = fr === 0 ? '#166534' : fr === 1 ? '#991b1b' : '#854d0e';
+                const sy = labelH + nSamples * cell + 6;
+                return <React.Fragment key={`s${j}`}>
+                  <rect x={labelW + j * cell} y={sy} width={cell} height={cell}
+                    fill={color + '55'} stroke={color} strokeWidth={1} rx={2} />
+                  <text x={labelW + j * cell + cell/2} y={sy + cell/2 + 3}
+                    fill={color === '#166534' ? '#22c55e' : color === '#991b1b' ? '#ef4444' : '#eab308'}
+                    textAnchor="middle" fontSize={7}>{Math.round(fr * 100)}</text>
+                </React.Fragment>;
+              })}
+            </svg>
+          </div>
+
+          {/* Detail panel */}
+          {detail && (
+            <div className={`mt-3 p-3 rounded-lg border ${C.bgPanel} ${C.border}`}>
+              <div className="flex justify-between items-center mb-2">
+                <strong className={`text-sm ${C.text}`}>
+                  {detail.type === 'cell' ? `Sample ${detail.sampleIdx+1}, Test ${detail.testIdx+1}` : `Test ${detail.testIdx+1} across all samples`}
+                </strong>
+                <button onClick={() => setDetail(null)} className={`text-lg ${C.textMuted}`}>&times;</button>
+              </div>
+              {detail.type === 'cell' ? (() => {
+                const t = allTests[detail.sampleIdx]?.[detail.testIdx];
+                if (!t) return <p className={C.textMuted}>No data.</p>;
+                return (
+                  <div className="grid grid-cols-[60px_1fr] gap-1 text-xs mono">
+                    <span className={C.textMuted}>Status:</span><span className={t.passed ? 'text-green-500' : 'text-red-500'}>{t.passed ? 'PASS' : 'FAIL'}</span>
+                    <span className={C.textMuted}>Input:</span><pre className={`whitespace-pre-wrap ${C.text}`}>{String(t.input || '').slice(0, 500)}</pre>
+                    <span className={C.textMuted}>Expected:</span><pre className="whitespace-pre-wrap text-green-400">{String(t.expected || '').slice(0, 500)}</pre>
+                    <span className={C.textMuted}>Actual:</span><pre className={`whitespace-pre-wrap ${t.passed ? 'text-green-400' : 'text-red-400'}`}>{String(t.actual || '').slice(0, 500)}</pre>
+                  </div>
+                );
+              })() : (
+                <div className="max-h-80 overflow-y-auto scrollbar-thin space-y-2">
+                  {allTests.map((tests, i) => {
+                    const t = tests[detail.testIdx];
+                    if (!t) return null;
+                    return (
+                      <div key={i} className={`text-xs mono border-b pb-2 ${C.borderSoft}`}>
+                        <span className={C.textMuted}>S{i+1}</span>{' '}
+                        <span className={t.passed ? 'text-green-500' : 'text-red-500'}>{t.passed ? 'PASS' : 'FAIL'}</span>
+                        <div className="grid grid-cols-[60px_1fr] gap-1 mt-1">
+                          <span className={C.textMuted}>Input:</span><span className={C.text}>{String(t.input || '').slice(0, 300)}</span>
+                          <span className={C.textMuted}>Expected:</span><span className="text-green-400">{String(t.expected || '').slice(0, 300)}</span>
+                          <span className={C.textMuted}>Actual:</span><span className={t.passed ? 'text-green-400' : 'text-red-400'}>{String(t.actual || '').slice(0, 300)}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function DiversitySubTab({ group: g, globalGroups }) {
+      // Compute global scale for consistent scaling
+      const allExtents = [];
+      for (const gg of globalGroups) {
+        if (gg.distMatrix.length > 1) {
+          const pts = mds2d(gg.distMatrix);
+          const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+          allExtents.push(Math.max(...xs) - Math.min(...xs));
+          allExtents.push(Math.max(...ys) - Math.min(...ys));
+        }
+      }
+      const globalScale = allExtents.length > 0 ? Math.max(...allExtents) : 1;
+
+      const n = g.distMatrix.length;
+      if (n === 0) return <p className={C.textMuted}>No data.</p>;
+
+      const points = mds2d(g.distMatrix);
+      const svgW = 400, svgH = 300, pad = 40;
+      const xs = points.map(p => p[0]), ys = points.map(p => p[1]);
+      const cx = xs.reduce((a, b) => a + b, 0) / n;
+      const cy = ys.reduce((a, b) => a + b, 0) / n;
+      const halfRange = globalScale / 2 || 1;
+
+      const toSvg = (px, py) => {
+        let sx = pad + ((px - cx) / halfRange * 0.5 + 0.5) * (svgW - 2 * pad);
+        let sy = pad + ((py - cy) / halfRange * 0.5 + 0.5) * (svgH - 2 * pad);
+        sx = Math.max(pad, Math.min(svgW - pad, sx));
+        sy = Math.max(pad, Math.min(svgH - pad, sy));
+        return [sx, sy];
+      };
+
+      const maxPass = Math.max(...g.passCounts, 1);
+      const pointColor = (p) => {
+        if (maxPass === 0) return '#ef4444';
+        const t = p / maxPass;
+        const r = Math.round(248 + (63 - 248) * t);
+        const gr = Math.round(81 + (185 - 81) * t);
+        const b = Math.round(73 + (80 - 73) * t);
+        return `rgb(${r},${gr},${b})`;
+      };
+
+      return (
+        <div>
+          <p className={`text-xs mb-2 ${C.textMuted}`}>
+            MDS projection of pairwise edit distance. Avg distance: <strong className={C.text}>{g.avgDist.toFixed(3)}</strong>.
+            Color: <span className="text-red-500">red</span>=0 tests passed, <span className="text-green-500">green</span>=all passed.
+          </p>
+          <svg width={svgW} height={svgH} className={`rounded-lg border ${C.border}`}
+            style={{fontFamily: 'JetBrains Mono, monospace', fontSize: 10, background: '#0d1117'}}>
+            {points.map((pt, i) => {
+              const [sx, sy] = toSvg(pt[0], pt[1]);
+              const color = pointColor(i < g.passCounts.length ? g.passCounts[i] : 0);
+              return (
+                <React.Fragment key={i}>
+                  <circle cx={sx} cy={sy} r={8} fill={color} fillOpacity={0.8} stroke="#c9d1d9" strokeWidth={0.5} />
+                  <text x={sx} y={sy + 3.5} fill="#f0f6fc" textAnchor="middle" fontSize={9} fontWeight="bold">{i+1}</text>
+                </React.Fragment>
+              );
+            })}
+          </svg>
+        </div>
+      );
+    }
+
+    function ResponsesSubTab({ group: g }) {
+      const [openIdx, setOpenIdx] = useState(null);
+      const allResponses = [
+        ...g.allFailMembers.map((m, i) => ({ ...m, isAllFail: true, idx: i })),
+        ...g.nonFailMembers.map((m, i) => ({ ...m, isAllFail: false, idx: g.allFailMembers.length + i })),
+      ];
+
+      return (
+        <div className="space-y-1">
+          {allResponses.map((m, ri) => {
+            const tests = m.parsed?.test_results || [];
+            const nPassed = tests.filter(t => t.passed).length;
+            const code = extractLastCodeBlock(m.trace.trajectory || m.trace.prompt || '');
+            const isOpen = openIdx === ri;
+            return (
+              <div key={ri} className={`rounded-lg border overflow-hidden ${C.border}`}>
+                <button onClick={() => setOpenIdx(isOpen ? null : ri)}
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-left text-xs transition-colors ${C.hoverBg}`}>
+                  <span className={C.textMuted}>Sample {ri+1}</span>
+                  <span className={C.textFaint}>reward: {m.trace.reward}</span>
+                  <span className={C.textFaint}>{nPassed}/{tests.length} tests</span>
+                  {m.isAllFail && <Badge color="red">all-fail</Badge>}
+                  <span className={`ml-auto text-xs ${C.textFaint}`}>{isOpen ? '▾' : '▸'}</span>
+                </button>
+                {isOpen && (
+                  <div className={`border-t p-3 ${C.border}`}>
+                    <pre className={`text-xs mono whitespace-pre-wrap max-h-96 overflow-y-auto scrollbar-thin ${C.text}`}>{code}</pre>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    function ValiditySubTab({ group: g }) {
+      const [results, setResults] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState(null);
+
+      // Find never-pass tests
+      const allTests = g.members.map(t => {
+        const parsed = parseGraderResponses(t.grader_responses);
+        return parsed?.test_results || [];
+      });
+      const nTests = Math.max(...allTests.map(t => t.length), 0);
+      const neverPass = [];
+      for (let j = 0; j < nTests; j++) {
+        const passes = allTests.filter(row => j < row.length && row[j].passed).length;
+        if (passes === 0) {
+          const example = allTests.find(row => j < row.length)?.[j];
+          if (example) neverPass.push({ test_index: j + 1, input: example.input, expected: example.expected });
+        }
+      }
+
+      const validate = async () => {
+        setLoading(true);
+        setError(null);
+        try {
+          const problemStmt = extractProblemStatement(g.prompt);
+          const resp = await api.post('/api/validate-tests', {
+            problem_statement: problemStmt,
+            never_pass_tests: neverPass,
+          });
+          setResults(resp);
+        } catch (e) {
+          setError(e.message);
+        }
+        setLoading(false);
+      };
+
+      if (neverPass.length === 0) {
+        return <p className="text-green-500 text-xs">No never-pass tests found. All tests pass in at least one sample.</p>;
+      }
+
+      return (
+        <div className="space-y-3">
+          <p className={`text-xs ${C.textMuted}`}>
+            {neverPass.length} test(s) fail in every sample. Validate them with Claude Haiku.
+          </p>
+          {!results && (
+            <button onClick={validate} disabled={loading}
+              className="px-3 py-1.5 text-xs bg-brand-600 text-white rounded-lg hover:bg-brand-500 disabled:opacity-50">
+              {loading ? <><Spinner /> Validating...</> : 'Validate Never-Pass Tests'}
+            </button>
+          )}
+          {error && <p className="text-xs text-red-500">Error: {error}</p>}
+          {results && (
+            <div className="space-y-2">
+              {results.map((v, i) => {
+                const verdict = v.verdict || 'unknown';
+                const colorMap = { likely_invalid: 'red', suspicious: 'yellow', valid: 'green', error: 'red' };
+                const color = colorMap[verdict] || 'gray';
+                const matchingTest = neverPass.find(t => t.test_index === v.test_index);
+                return (
+                  <div key={i} className={`p-3 rounded-lg border ${
+                    color === 'red' ? 'bg-red-900/20 border-red-700/30' :
+                    color === 'yellow' ? 'bg-yellow-900/20 border-yellow-700/30' :
+                    'bg-green-900/20 border-green-700/30'
+                  }`}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <Badge color={color}>Test {v.test_index} - {verdict.toUpperCase()}</Badge>
+                    </div>
+                    <p className={`text-xs ${C.textSecondary}`}>{v.reason}</p>
+                    {matchingTest && (
+                      <div className="grid grid-cols-[60px_1fr] gap-1 mt-2 text-xs mono">
+                        <span className={C.textMuted}>Input:</span><span className={C.text}>{String(matchingTest.input || '').slice(0, 300)}</span>
+                        <span className={C.textMuted}>Expected:</span><span className="text-green-400">{String(matchingTest.expected || '').slice(0, 300)}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function parsePastedTrace(data) {
       const sample = data.inputs?.something || data;
       const metadata = sample.metadata || {};
@@ -794,6 +1452,96 @@
         verification: logging_info.verification,
         messages: metadata.messages || sample.messages || [],
       };
+    }
+
+    // ---- Trace Test Results (coding-specific visualization) ----
+    function TraceTestResults({ graderResponses }) {
+      const [expandedTest, setExpandedTest] = useState(null);
+      const [showRaw, setShowRaw] = useState(false);
+
+      const parsed = parseGraderResponses(graderResponses);
+      const tests = parsed?.test_results || [];
+
+      if (!tests.length) {
+        return (
+          <div className="p-2 rounded-lg border bg-purple-50 dark:bg-purple-900/10 border-purple-200 dark:border-purple-800/30">
+            <div className="text-xs font-medium text-purple-600 dark:text-purple-400 mb-1">Grader Responses</div>
+            <pre className={`text-xs mono whitespace-pre-wrap max-h-[200px] overflow-y-auto scrollbar-thin ${C.textSecondary}`}>{graderResponses}</pre>
+          </div>
+        );
+      }
+
+      const nPassed = tests.filter(t => t.passed).length;
+      const nFailed = tests.length - nPassed;
+      const passRate = tests.length > 0 ? (nPassed / tests.length * 100) : 0;
+      const barColor = passRate < 25 ? '#ef4444' : passRate < 60 ? '#eab308' : '#22c55e';
+
+      return (
+        <div className={`p-3 rounded-lg border ${C.bgSoft} ${C.border}`}>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-3">
+              <span className={`text-xs font-medium ${C.textSecondary}`}>Test Results</span>
+              <Badge color="green">{nPassed} passed</Badge>
+              <Badge color="red">{nFailed} failed</Badge>
+              <div className="w-24 h-2 bg-gray-700 rounded-full overflow-hidden">
+                <div className="h-full rounded-full" style={{width: `${passRate}%`, background: barColor}} />
+              </div>
+              <span className={`text-xs mono ${C.textMuted}`}>{passRate.toFixed(0)}%</span>
+            </div>
+            <button onClick={() => setShowRaw(!showRaw)}
+              className={`text-xs px-2 py-0.5 rounded ${C.btn}`}>
+              {showRaw ? 'Visual' : 'Raw'}
+            </button>
+          </div>
+
+          {showRaw ? (
+            <pre className={`text-xs mono whitespace-pre-wrap max-h-[200px] overflow-y-auto scrollbar-thin ${C.textSecondary}`}>{graderResponses}</pre>
+          ) : (
+            <div className="space-y-0.5">
+              {/* Visual test bar */}
+              <div className="flex gap-0.5 mb-2 flex-wrap">
+                {tests.map((t, i) => (
+                  <div key={i}
+                    onClick={() => setExpandedTest(expandedTest === i ? null : i)}
+                    className={`w-5 h-5 rounded-sm cursor-pointer flex items-center justify-center text-[8px] font-bold ${
+                      t.passed ? 'bg-green-700 text-green-200 hover:bg-green-600' : 'bg-red-700 text-red-200 hover:bg-red-600'
+                    } ${expandedTest === i ? 'ring-2 ring-brand-400' : ''}`}>
+                    {i + 1}
+                  </div>
+                ))}
+              </div>
+
+              {/* Expanded test detail */}
+              {expandedTest != null && tests[expandedTest] && (() => {
+                const t = tests[expandedTest];
+                return (
+                  <div className={`p-2.5 rounded-lg border ${t.passed ? 'bg-green-900/20 border-green-700/30' : 'bg-red-900/20 border-red-700/30'}`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className={`text-xs font-medium ${t.passed ? 'text-green-400' : 'text-red-400'}`}>
+                        Test {expandedTest + 1} — {t.passed ? 'PASS' : 'FAIL'}
+                      </span>
+                      <button onClick={() => setExpandedTest(null)} className={`text-sm ${C.textMuted}`}>&times;</button>
+                    </div>
+                    <div className="grid grid-cols-[60px_1fr] gap-1 text-xs mono">
+                      <span className={C.textMuted}>Input:</span>
+                      <pre className={`whitespace-pre-wrap ${C.text} max-h-32 overflow-y-auto scrollbar-thin`}>{String(t.input || '').slice(0, 1000)}</pre>
+                      <span className={C.textMuted}>Expected:</span>
+                      <pre className="whitespace-pre-wrap text-green-400 max-h-32 overflow-y-auto scrollbar-thin">{String(t.expected || '').slice(0, 1000)}</pre>
+                      <span className={C.textMuted}>Actual:</span>
+                      <pre className={`whitespace-pre-wrap max-h-32 overflow-y-auto scrollbar-thin ${t.passed ? 'text-green-400' : 'text-red-400'}`}>{String(t.actual || '').slice(0, 1000)}</pre>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Failed tests summary */}
+              {nFailed > 0 && expandedTest == null && (
+                <div className={`text-xs ${C.textMuted} mt-1`}>Click a test cell to see input/expected/actual details</div>
+              )}
+            </div>
+          )}
+        </div>
+      );
     }
 
     // ---- Trace Detail ----
@@ -869,17 +1617,12 @@
             </div>
           )}
 
-          {trace.grader_responses && (
-            <div className="p-2 rounded-lg border bg-purple-50 dark:bg-purple-900/10 border-purple-200 dark:border-purple-800/30">
-              <div className="text-xs font-medium text-purple-600 dark:text-purple-400 mb-1">Grader Responses</div>
-              <pre className={`text-xs mono whitespace-pre-wrap max-h-[200px] overflow-y-auto scrollbar-thin ${C.textSecondary}`}>{trace.grader_responses}</pre>
-            </div>
-          )}
+          {trace.grader_responses && <TraceTestResults graderResponses={trace.grader_responses} />}
 
           {trace.prompt && (
             <div className={`p-3 rounded-lg border ${C.bgSoft} ${C.border}`}>
-              <div className={`text-xs mb-1 ${C.textMuted}`}>Prompt</div>
-              <pre className={`text-sm mono whitespace-pre-wrap max-h-[300px] overflow-y-auto scrollbar-thin ${C.text}`}>{trace.prompt}</pre>
+              <div className={`text-xs mb-1 ${C.textMuted}`}>Prompt (user)</div>
+              <pre className={`text-sm mono whitespace-pre-wrap max-h-[300px] overflow-y-auto scrollbar-thin ${C.text}`}>{extractProblemStatement(trace.prompt)}</pre>
             </div>
           )}
 
