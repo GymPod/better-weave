@@ -109,8 +109,6 @@
       traces: (id, version) => api.get(`${_apiBase}/runs/${id}/traces?${api._ep(version != null ? {version} : {})}`),
       ask: (body) => api.post(`${_apiBase}/ask`, { ...body, entity: _apiEntity, project: _apiProject }),
       config: () => api.get(`${_apiBase}/config`),
-      localRuns: () => api.get(`${_apiBase}/local-runs`),
-      localTraces: (filename) => api.get(`${_apiBase}/local-runs/${encodeURIComponent(filename)}/traces`),
     };
 
     // ---- Shared Components ----
@@ -188,7 +186,6 @@
     // ---- Run List ----
     function RunList({ onSelectRun, selectedRunId, refreshTrigger }) {
       const [runs, setRuns] = useState([]);
-      const [localRuns, setLocalRuns] = useState([]);
       const [loading, setLoading] = useState(true);
       const [search, setSearch] = useState('');
       const [stateFilter, setStateFilter] = useState('');
@@ -196,16 +193,18 @@
       const doFetch = async (s, f) => {
         setLoading(true);
         try {
-          const [remoteData, localData] = await Promise.all([
-            api.runs({ limit: 50, ...(f ? {state: f} : {}), ...(s ? {search: s} : {}) }).catch(() => []),
-            api.localRuns().catch(() => []),
-          ]);
-          setRuns(remoteData);
-          setLocalRuns(localData);
+          const params = { limit: 50 };
+          if (f) params.state = f;
+          if (s) params.search = s;
+          const data = await api.runs(params);
+          setRuns(data);
           if (selectedRunId && onSelectRun) {
-            const full = remoteData.find(r => r.id === selectedRunId) ||
-                         localData.find(r => r.id === selectedRunId);
-            if (full) onSelectRun(full, true);
+            const full = data.find(r => r.id === selectedRunId);
+            if (full) {
+              onSelectRun(full, true);
+            } else {
+              onSelectRun(null);
+            }
           }
         } catch (e) {
           console.error('Failed to fetch runs:', e);
@@ -239,64 +238,27 @@
           <div className="flex-1 overflow-y-auto scrollbar-thin">
             {loading ? (
               <div className="flex items-center justify-center py-8"><Spinner /></div>
-            ) : (
-              <>
-                {/* Local files */}
-                {localRuns.length > 0 && (
-                  <>
-                    <div className={`px-3 py-1.5 text-xs font-medium uppercase tracking-wider ${C.textFaint} ${C.bgMuted} border-b ${C.border}`}>
-                      Local Files
-                    </div>
-                    {localRuns.map(lr => (
-                      <button key={lr.id}
-                        onClick={() => onSelectRun(lr)}
-                        className={`w-full text-left px-3 py-2.5 border-b transition-colors ${C.borderSoft} ${
-                          selectedRunId === lr.id ? C.activeBg : C.hoverBg
-                        }`}>
-                        <div className="flex items-center gap-1.5">
-                          <span className="inline-block w-2 h-2 rounded-full bg-purple-500 mr-1.5"></span>
-                          <span className={`text-sm font-medium truncate flex-1 ${C.text}`}>{lr.display_name}</span>
-                        </div>
-                        <div className="flex items-center gap-2 mt-1">
-                          <Badge color="purple">local</Badge>
-                          <span className={`text-xs ${C.textMuted}`}>{lr.nrows} rows</span>
-                          <span className={`text-xs ${C.textMuted}`}>{lr.size_mb} MB</span>
-                        </div>
-                      </button>
-                    ))}
-                  </>
-                )}
-                {/* Remote W&B runs */}
-                {runs.length > 0 && (
-                  <>
-                    <div className={`px-3 py-1.5 text-xs font-medium uppercase tracking-wider ${C.textFaint} ${C.bgMuted} border-b ${C.border}`}>
-                      W&B Runs
-                    </div>
-                    {runs.map(run => (
-                      <button key={run.id}
-                        onClick={() => onSelectRun(run)}
-                        className={`w-full text-left px-3 py-2.5 border-b transition-colors ${C.borderSoft} ${
-                          selectedRunId === run.id ? C.activeBg : C.hoverBg
-                        }`}>
-                        <div className="flex items-center gap-1.5">
-                          <StateIcon state={run.state} />
-                          <span className={`text-sm font-medium truncate flex-1 ${C.text}`}>{run.display_name}</span>
-                        </div>
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className={`text-xs mono ${C.textMuted}`}>{run.id}</span>
-                          <Badge color={run.state === 'running' ? 'green' : run.state === 'finished' ? 'gray' : 'red'}>
-                            {run.state}
-                          </Badge>
-                          {run.history_count > 0 && (
-                            <span className={`text-xs ${C.textMuted}`}>{run.history_count} steps</span>
-                          )}
-                        </div>
-                      </button>
-                    ))}
-                  </>
-                )}
-              </>
-            )}
+            ) : runs.map(run => (
+              <button key={run.id}
+                onClick={() => onSelectRun(run)}
+                className={`w-full text-left px-3 py-2.5 border-b transition-colors ${C.borderSoft} ${
+                  selectedRunId === run.id ? `${C.activeBg}` : C.hoverBg
+                }`}>
+                <div className="flex items-center gap-1.5">
+                  <StateIcon state={run.state} />
+                  <span className={`text-sm font-medium truncate flex-1 ${C.text}`}>{run.display_name}</span>
+                </div>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className={`text-xs mono ${C.textMuted}`}>{run.id}</span>
+                  <Badge color={run.state === 'running' ? 'green' : run.state === 'finished' ? 'gray' : 'red'}>
+                    {run.state}
+                  </Badge>
+                  {run.history_count > 0 && (
+                    <span className={`text-xs ${C.textMuted}`}>{run.history_count} steps</span>
+                  )}
+                </div>
+              </button>
+            ))}
           </div>
         </div>
       );
@@ -327,9 +289,8 @@
 
     // ---- Run Detail Panel ----
     function RunDetail({ run, onSelectTrace, restoredTraceIdx }) {
-      const isLocal = run.id?.startsWith('local:');
       const hasRestoredTrace = restoredTraceIdx != null;
-      const [tab, setTab] = useState(isLocal ? 'analysis' : (hasRestoredTrace ? 'traces' : 'metrics'));
+      const [tab, setTab] = useState(hasRestoredTrace ? 'traces' : 'metrics');
       const [detail, setDetail] = useState(null);
       const [history, setHistory] = useState(null);
       const [traces, setTraces] = useState(null);
@@ -337,20 +298,6 @@
 
       useEffect(() => {
         setLoading(true);
-        if (isLocal) {
-          setTab('analysis');
-          // Load local file traces directly
-          const filename = run.filename || run.id.replace('local:', '');
-          api.localTraces(filename).then(data => {
-            setTraces(data);
-            setLoading(false);
-          }).catch(e => {
-            console.error('Failed to load local file:', e);
-            setTraces({ traces: [], count: 0, source: 'error' });
-            setLoading(false);
-          });
-          return;
-        }
         if (!hasRestoredTrace) setTab('metrics');
         setDetail(null);
         setHistory(null);
@@ -435,7 +382,7 @@
 
           {/* Tabs */}
           <div className={`flex border-b ${C.border} px-4`}>
-            {(isLocal ? ['analysis', 'traces'] : ['metrics', 'config', 'traces', 'analysis']).map(t => (
+            {['metrics', 'config', 'traces', 'analysis'].map(t => (
               <button key={t}
                 onClick={() => setTab(t)}
                 className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${

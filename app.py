@@ -36,7 +36,6 @@ CACHE_DIR = Path(os.environ.get("BETTER_WEAVE_CACHE", "/tmp/better_weave_cache")
 WANDB_BASE_URL = os.environ.get("WANDB_BASE_URL", "https://wandb.agi.amazon.dev")
 DEFAULT_ENTITY = os.environ.get("BETTER_WEAVE_ENTITY", "autonomy")
 DEFAULT_PROJECT = os.environ.get("BETTER_WEAVE_PROJECT", "slime-agent")
-LOCAL_DATA_DIR = Path(os.environ.get("BETTER_WEAVE_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
 
 # ---------- Cache helpers ----------
@@ -266,69 +265,6 @@ def _fetch_trace_versions(entity: str, project: str, run_id: str, versions: list
 
     return {"traces": traces, "count": len(traces), "source": "artifacts"}
 
-
-# ---------- Local File Support ----------
-
-
-def _parse_local_table(filepath: Path) -> list[dict]:
-    """Parse a W&B table JSON file into trace dicts."""
-    with open(filepath) as f:
-        table = json.load(f)
-    columns = table.get("columns", [])
-    traces = []
-    for row_idx, row in enumerate(table.get("data", [])):
-        row_dict = dict(zip(columns, row))
-        traces.append(_row_dict_to_trace(row_dict, f"local-{filepath.stem}-{row_idx}"))
-    return traces
-
-
-_local_file_cache: dict[str, list[dict]] = {}
-
-
-@app.get("/api/local-runs")
-def list_local_runs() -> list[dict]:
-    """List JSON table files in the data directory."""
-    results = []
-    for p in sorted(LOCAL_DATA_DIR.glob("*.json")):
-        try:
-            with open(p) as f:
-                header = json.load(f)
-            if header.get("_type", "").lower() == "table" and "columns" in header and "data" in header:
-                results.append({
-                    "id": f"local:{p.name}",
-                    "display_name": p.stem,
-                    "filename": p.name,
-                    "state": "local",
-                    "nrows": header.get("nrows", len(header.get("data", []))),
-                    "ncols": header.get("ncols", len(header.get("columns", []))),
-                    "size_mb": round(p.stat().st_size / 1024 / 1024, 1),
-                })
-        except Exception:
-            continue
-    return results
-
-
-@app.get("/api/local-runs/{filename}/traces")
-def get_local_traces(filename: str) -> dict:
-    """Load traces from a local JSON table file."""
-    filepath = LOCAL_DATA_DIR / filename
-    if not filepath.exists() or not filepath.suffix == ".json":
-        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
-    # Ensure it's within the data dir
-    if not filepath.resolve().parent == LOCAL_DATA_DIR.resolve():
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    if filename in _local_file_cache:
-        traces = _local_file_cache[filename]
-    else:
-        try:
-            traces = _parse_local_table(filepath)
-            _local_file_cache[filename] = traces
-            logger.info(f"Loaded {len(traces)} traces from {filename}")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to parse {filename}: {e}")
-
-    return {"traces": traces, "count": len(traces), "source": "local"}
 
 
 # ---------- API Routes ----------
